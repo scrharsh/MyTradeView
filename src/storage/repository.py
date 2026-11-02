@@ -6,6 +6,7 @@ from typing import List, Optional
 from uuid import uuid4
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from src.common.constants import ExecutionMode, OrderStatus, SessionPhase
 from src.core.models import (
@@ -30,7 +31,11 @@ from src.storage.schema import (
     RiskSnapshotRecord,
     SessionRecord,
     StrategyConfigRecord,
+    BacktestRunRecord,
+    BacktestTradeRecord,
 )
+from src.backtest.models import BacktestRun
+
 
 
 class StateRepository:
@@ -388,3 +393,71 @@ class StateRepository:
         )
         self._session.add(record)
         await self._session.flush()
+
+    # --------------------------------------------------------------------------
+    # 8. Backtest Persistence
+    # --------------------------------------------------------------------------
+
+    async def save_backtest_run(self, run: BacktestRun) -> None:
+        """Persist authoritative backtest simulation run and all associated trade logs."""
+        run_record = BacktestRunRecord(
+            run_id=run.run_id,
+            dataset_id=run.dataset_id,
+            start_date=run.start_date,
+            end_date=run.end_date,
+            strategy_name=run.strategy_name,
+            strategy_version=run.strategy_version,
+            strategy_config_snapshot=run.strategy_config_snapshot,
+            execution_config=run.execution_config.model_dump(mode="json"),
+            engine_version=run.engine_version,
+            metrics_json=run.metrics.model_dump(mode="json"),
+            diagnostics_json=run.diagnostics.model_dump(mode="json"),
+            created_at=run.created_at,
+        )
+        self._session.add(run_record)
+
+        for trade in run.trades:
+            trade_record = BacktestTradeRecord(
+                trade_id=trade.trade_id,
+                run_id=run.run_id,
+                symbol=trade.symbol,
+                underlying_symbol=trade.underlying_symbol,
+                option_type=trade.option_type.value,
+                strike=trade.strike,
+                direction=trade.direction,
+                entry_time=trade.entry_time,
+                exit_time=trade.exit_time,
+                entry_price=trade.entry_price,
+                exit_price=trade.exit_price,
+                qty=trade.qty,
+                lot_size=trade.lot_size,
+                gross_pnl=trade.gross_pnl,
+                trading_costs=trade.trading_costs,
+                net_pnl=trade.net_pnl,
+                exit_reason=trade.exit_reason,
+            )
+            self._session.add(trade_record)
+
+        await self._session.flush()
+
+    async def get_backtest_run(self, run_id: str) -> Optional[BacktestRunRecord]:
+        """Fetch backtest run record with eager trades relationship."""
+        stmt = (
+            select(BacktestRunRecord)
+            .options(selectinload(BacktestRunRecord.trades))
+            .where(BacktestRunRecord.run_id == run_id)
+        )
+        res = await self._session.execute(stmt)
+        return res.scalar_one_or_none()
+
+    async def list_backtest_runs(self, limit: int = 50) -> List[BacktestRunRecord]:
+        """Fetch latest backtest runs ordered by created_at desc."""
+        stmt = (
+            select(BacktestRunRecord)
+            .options(selectinload(BacktestRunRecord.trades))
+            .order_by(BacktestRunRecord.created_at.desc())
+            .limit(limit)
+        )
+        res = await self._session.execute(stmt)
+        return list(res.scalars().all())
+

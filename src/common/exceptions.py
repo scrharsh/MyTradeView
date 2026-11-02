@@ -81,3 +81,9 @@ class ReconciliationError(TradeViewError):
 class DataValidationError(TradeViewError):
     """Raised when market data ticks or candles fail sanity/integrity checks."""
     pass
+
+
+class MissingMarketDataError(DataValidationError):
+    """Raised when expected market candles or ticks are absent during execution evaluation."""
+    pass
+

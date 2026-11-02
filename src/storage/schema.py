@@ -216,3 +216,51 @@ class AuditEventRecord(Base):
     details: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
 
     session: Mapped["SessionRecord"] = relationship(back_populates="audit_events")
+
+
+class BacktestRunRecord(Base):
+    """Database record for completed backtest simulation runs."""
+    __tablename__ = "backtest_runs"
+
+    run_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    dataset_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    start_date: Mapped[Date] = mapped_column(Date, nullable=False)
+    end_date: Mapped[Date] = mapped_column(Date, nullable=False)
+    strategy_name: Mapped[str] = mapped_column(String(64), nullable=False)
+    strategy_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    strategy_config_snapshot: Mapped[dict] = mapped_column(JSON, nullable=False)
+    execution_config: Mapped[dict] = mapped_column(JSON, nullable=False)
+    engine_version: Mapped[str] = mapped_column(String(16), default="1.0.0", nullable=False)
+    metrics_json: Mapped[dict] = mapped_column(JSON, nullable=False)
+    diagnostics_json: Mapped[dict] = mapped_column(JSON, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    trades: Mapped[list["BacktestTradeRecord"]] = relationship(
+        back_populates="run", cascade="all, delete-orphan", lazy="selectin"
+    )
+
+
+class BacktestTradeRecord(Base):
+    """Database record for individual round-trip trades executed in a backtest."""
+    __tablename__ = "backtest_trades"
+
+    trade_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    run_id: Mapped[str] = mapped_column(String(64), ForeignKey("backtest_runs.run_id"), nullable=False, index=True)
+    symbol: Mapped[str] = mapped_column(String(64), nullable=False)
+    underlying_symbol: Mapped[str] = mapped_column(String(64), nullable=False)
+    option_type: Mapped[str] = mapped_column(String(4), nullable=False)
+    strike: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    direction: Mapped[str] = mapped_column(String(8), default="BUY", nullable=False)
+    entry_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    exit_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    entry_price: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    exit_price: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    qty: Mapped[int] = mapped_column(Integer, nullable=False)
+    lot_size: Mapped[int] = mapped_column(Integer, nullable=False)
+    gross_pnl: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    trading_costs: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    net_pnl: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    exit_reason: Mapped[str] = mapped_column(String(256), nullable=False)
+
+    run: Mapped["BacktestRunRecord"] = relationship(back_populates="trades")
+
