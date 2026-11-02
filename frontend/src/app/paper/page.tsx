@@ -31,69 +31,35 @@ export default function PaperTradingPage() {
   const [isPaused, setIsPaused] = useState(false);
   const [actionNotice, setActionNotice] = useState<string | null>(null);
 
-  // Simulated live event feed
+  // Live event feed from persistent audit events
   const [liveLogs, setLiveLogs] = useState<
     { timestamp: string; level: string; message: string }[]
-  >([
-    {
-      timestamp: "09:16:00",
-      level: "INFO",
-      message: "Session SES-20261106-001 started in PAPER execution mode",
-    },
-    {
-      timestamp: "09:16:05",
-      level: "INFO",
-      message: "Opening range window initialized: 09:16:00 to 09:45:00 IST",
-    },
-    {
-      timestamp: "09:45:00",
-      level: "STATE",
-      message: "Opening range established. High: 25,045.50 | Low: 24,962.10",
-    },
-    {
-      timestamp: "09:45:02",
-      level: "INFO",
-      message: "Transitioned to WAITING_FOR_BREAKOUT. Tracking spot ticks...",
-    },
-    {
-      timestamp: "09:46:00",
-      level: "SIGNAL",
-      message: "Bullish breakout detected! 09:46 Close: 25,055.20 > ORB High 25,045.50",
-    },
-    {
-      timestamp: "09:46:01",
-      level: "RESOLVER",
-      message: "Resolved ATM CE contract: NSE:NIFTY26NOV25000CE (Strike 25000 CE)",
-    },
-    {
-      timestamp: "09:46:02",
-      level: "OMS",
-      message: "Created order intent INT-001 -> Validating risk limits -> DISPATCHED",
-    },
-    {
-      timestamp: "09:46:03",
-      level: "FILL",
-      message: "Paper broker executed BUY 75 NSE:NIFTY26NOV25000CE @ 143.00",
-    },
-    {
-      timestamp: "10:15:00",
-      level: "RISK",
-      message: "Profit tracker update: LTP 154.50. Unrealized P&L: ₹862.50. Risk floor: ₹0.00",
-    },
-  ]);
+  >([]);
 
   const loadData = async () => {
     try {
-      const [sRes, pRes, oRes, rRes] = await Promise.allSettled([
+      const [sRes, pRes, oRes, rRes, aRes] = await Promise.allSettled([
         api.getActiveSession(),
         api.getPositions(),
         api.getOrders(),
         api.getRiskSnapshot(),
+        api.getAuditEvents(50),
       ]);
       if (sRes.status === "fulfilled") setSession(sRes.value);
       if (pRes.status === "fulfilled") setPositions(Array.isArray(pRes.value) ? pRes.value : []);
       if (oRes.status === "fulfilled") setOrders(Array.isArray(oRes.value) ? oRes.value : []);
       if (rRes.status === "fulfilled") setRisk(rRes.value);
+      if (aRes.status === "fulfilled" && Array.isArray(aRes.value)) {
+        const events = aRes.value.map((evt) => {
+          const detailStr = typeof evt.details === "object" ? JSON.stringify(evt.details) : String(evt.details || "");
+          return {
+            timestamp: formatISTTime(evt.timestamp),
+            level: evt.event_type || "EVENT",
+            message: `${evt.component || evt.actor || "SYSTEM"}: ${detailStr}`,
+          };
+        });
+        setLiveLogs(events);
+      }
     } catch (err) {
       console.error("Paper console refresh error:", err);
     }
@@ -145,20 +111,25 @@ export default function PaperTradingPage() {
     }
   };
 
+  const strategyState = session?.strategy_state || (positions.length > 0 ? "IN_POSITION" : "WAITING_FOR_ORB");
+  const isOrbEst = session?.opening_range?.is_established || false;
+  const hasPositions = positions.length > 0;
+  const isSquaredOff = !hasPositions && orders.length > 0 && orders.some((o) => o.side === "SELL");
+
   const stateStages = [
-    { id: "ORB_BUILDING", label: "09:16-09:45 ORB BUILDING", completed: true },
-    { id: "ORB_ESTABLISHED", label: "ORB ESTABLISHED", completed: true },
-    { id: "BREAKOUT_TRIGGERED", label: "BREAKOUT ENTRY", completed: true },
+    { id: "ORB_BUILDING", label: "09:16-09:45 ORB BUILDING", completed: isOrbEst, active: !isOrbEst },
+    { id: "ORB_ESTABLISHED", label: "ORB ESTABLISHED", completed: isOrbEst, active: isOrbEst && !hasPositions && !isSquaredOff },
+    { id: "BREAKOUT_TRIGGERED", label: "BREAKOUT ENTRY", completed: hasPositions || isSquaredOff, active: false },
     {
       id: "POSITION_OPEN",
       label: "POSITION ACTIVE (PROFIT TRAILING)",
-      completed: positions.length > 0,
-      active: positions.length > 0,
+      completed: hasPositions,
+      active: hasPositions,
     },
-    { id: "SQUARED_OFF", label: "SQUARED OFF / EOD", completed: false },
+    { id: "SQUARED_OFF", label: "SQUARED OFF / EOD", completed: isSquaredOff, active: isSquaredOff },
   ];
 
-  const netMtm = risk ? parseFloat(String(risk.total_mtm)) : 862.5;
+  const netMtm = risk ? parseFloat(String(risk.total_mtm)) : 0.0;
 
   return (
     <div className="space-y-6">
@@ -216,7 +187,7 @@ export default function PaperTradingPage() {
             <Layers className="w-4 h-4 text-cyan-400" />
             <span>STRATEGY STATE MACHINE</span>
           </div>
-          <span className="text-[10px] text-emerald-400 font-bold">STATE: IN_POSITION (LONG CE)</span>
+          <span className="text-[10px] text-emerald-400 font-bold">STATE: {strategyState}</span>
         </div>
 
         <div className="grid grid-cols-1 md:grid-cols-5 gap-2 pt-2">
@@ -338,10 +309,10 @@ export default function PaperTradingPage() {
           {/* Current Position Quick Snapshot */}
           <div className="pt-2 border-t border-[#1c2638] flex items-center justify-between font-mono text-xs">
             <div className="text-slate-400">
-              Active Contract: <strong className="text-slate-200">NSE:NIFTY26NOV25000CE</strong>
+              Active Contract: <strong className="text-slate-200">{session?.active_contract_symbol || (positions.length > 0 ? positions[0].symbol : "None")}</strong>
             </div>
             <div className="text-right">
-              MTM: <strong className={getPnlColor(netMtm)}>{formatINR(netMtm)}</strong>
+              MTM: <strong className={getPnlColor(netMtm)}>{risk ? formatINR(netMtm) : "--"}</strong>
             </div>
           </div>
         </div>

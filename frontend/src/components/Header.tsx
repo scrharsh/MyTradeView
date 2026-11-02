@@ -65,7 +65,7 @@ export function Header({ onOpenKillSwitch }: HeaderProps) {
     };
   }, []);
 
-  const totalMtm = risk ? parseFloat(String(risk.total_mtm)) : 862.5;
+  const totalMtm = risk ? parseFloat(String(risk.total_mtm)) : null;
 
   return (
     <header className="h-14 border-b border-[#1c2638] bg-[#0c1017] px-4 flex items-center justify-between sticky top-0 z-40 select-none">
@@ -95,9 +95,13 @@ export function Header({ onOpenKillSwitch }: HeaderProps) {
         {/* Live MTM */}
         <div className="flex items-center space-x-2 bg-[#121824] px-3 py-1 rounded border border-[#1f293d]">
           <span className="text-slate-400">SESSION MTM:</span>
-          <span className={`font-bold ${getPnlColor(totalMtm)}`}>
-            {formatINR(totalMtm)}
-          </span>
+          {totalMtm !== null ? (
+            <span className={`font-bold ${getPnlColor(totalMtm)}`}>
+              {formatINR(totalMtm)}
+            </span>
+          ) : (
+            <span className="text-slate-500">--</span>
+          )}
         </div>
 
         {/* Phase */}
@@ -112,7 +116,11 @@ export function Header({ onOpenKillSwitch }: HeaderProps) {
         <div className="flex items-center space-x-1 text-slate-400">
           <span className="text-slate-500">ORB:</span>
           <span className="text-amber-400 font-medium">
-            {session?.opening_range?.is_established ? "24,962 - 25,045" : "BUILDING"}
+            {session?.opening_range?.is_established && session.opening_range.low && session.opening_range.high
+              ? `${Number(session.opening_range.low).toFixed(1)} - ${Number(session.opening_range.high).toFixed(1)}`
+              : session?.opening_range?.is_established
+              ? "ESTABLISHED"
+              : "NOT ESTABLISHED"}
           </span>
         </div>
 
@@ -128,18 +136,18 @@ export function Header({ onOpenKillSwitch }: HeaderProps) {
       <div className="flex items-center space-x-3">
         {/* Health Indicators */}
         <div className="hidden lg:flex items-center space-x-2 text-[11px] font-mono text-slate-400 bg-[#121824] px-2.5 py-1 rounded border border-[#1f293d]">
-          <div className="flex items-center space-x-1" title="FYERS Paper Connection">
-            <Wifi className="w-3.5 h-3.5 text-emerald-400" />
+          <div className="flex items-center space-x-1" title={health?.broker_connected ? "Broker Connected" : "Broker Disconnected"}>
+            <Wifi className={`w-3.5 h-3.5 ${health?.broker_connected ? "text-emerald-400" : "text-amber-400"}`} />
             <span className="text-slate-300">BROKER</span>
           </div>
           <span className="text-slate-600">|</span>
-          <div className="flex items-center space-x-1" title="PostgreSQL / SQLite Storage">
-            <Database className="w-3.5 h-3.5 text-emerald-400" />
+          <div className="flex items-center space-x-1" title={health?.database_connected ? "Database Connected" : "Database Offline"}>
+            <Database className={`w-3.5 h-3.5 ${health?.database_connected ? "text-emerald-400" : "text-rose-400"}`} />
             <span className="text-slate-300">DB</span>
           </div>
           <span className="text-slate-600">|</span>
-          <div className="flex items-center space-x-1" title="OMS / Broker State Reconciliation">
-            <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+          <div className="flex items-center space-x-1" title={health?.is_reconciled ? "State Synchronized" : "Reconciliation Pending"}>
+            <CheckCircle2 className={`w-3.5 h-3.5 ${health?.is_reconciled ? "text-emerald-400" : "text-amber-400"}`} />
             <span className="text-slate-300">SYNC</span>
           </div>
         </div>

@@ -142,7 +142,7 @@ export function TradingChart({
           lineWidth: 2 as LineWidth,
           lineStyle: LineStyle.Dashed,
           axisLabelVisible: true,
-          title: "ORB HIGH (25,045.50)",
+          title: `ORB HIGH (${formatNumber(orbHigh, 2)})`,
         });
       }
 
@@ -153,7 +153,7 @@ export function TradingChart({
           lineWidth: 2 as LineWidth,
           lineStyle: LineStyle.Dashed,
           axisLabelVisible: true,
-          title: "ORB LOW (24,962.10)",
+          title: `ORB LOW (${formatNumber(orbLow, 2)})`,
         });
       }
 

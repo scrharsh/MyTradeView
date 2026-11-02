@@ -119,6 +119,8 @@ export interface RiskSnapshotResponse {
   profit_floor: number | string;
   open_positions_count: number;
   is_data_stale: boolean;
+  is_synthetic?: boolean;
+  data_source?: string;
 }
 
 export interface OrderTransitionResponseItem {
@@ -162,6 +164,8 @@ export interface OrderResponseItem {
   updated_at: string;
   transitions: OrderTransitionResponseItem[];
   fills: FillResponseItem[];
+  is_synthetic?: boolean;
+  data_source?: string;
 }
 
 export interface PositionResponseItem {
@@ -181,6 +185,8 @@ export interface PositionResponseItem {
   is_open: boolean;
   opened_at: string;
   closed_at?: string | null;
+  is_synthetic?: boolean;
+  data_source?: string;
 }
 
 export interface BacktestEquityPoint {
@@ -269,9 +275,12 @@ export type StrategyConfigItem = StrategyConfigVersionResponse;
 export type StrategyValidationResult = StrategyValidateResponse;
 export type StrategyTemplateItem = StrategyTemplateResponse;
 export interface AuditEventItem {
+  event_id?: string;
+  session_id?: string;
   timestamp: string;
   event_type: string;
-  actor: string;
-  details: string;
+  component?: string;
+  actor?: string;
+  details: Record<string, any> | string;
 }
 

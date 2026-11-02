@@ -27,50 +27,19 @@ export default function RiskPage() {
   const [isReconciling, setIsReconciling] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
 
-  // Sample immutable audit log items
-  const [auditEvents, setAuditEvents] = useState<
-    { timestamp: string; event_type: string; actor: string; details: string }[]
-  >([
-    {
-      timestamp: "09:16:00",
-      event_type: "SESSION_INIT",
-      actor: "ENGINE",
-      details: "Session SES-20261106-001 created. Daily loss circuit breaker armed at ₹3,000.00.",
-    },
-    {
-      timestamp: "09:45:00",
-      event_type: "ORB_ESTABLISHED",
-      actor: "ORB_TRACKER",
-      details: "Range finalized: High 25,045.50, Low 24,962.10 across 29 one-minute intervals.",
-    },
-    {
-      timestamp: "09:46:00",
-      event_type: "ORDER_SUBMITTED",
-      actor: "OMS_ENGINE",
-      details: "Client order ORD-20261106-001 BUY 75 NSE:NIFTY26NOV25000CE validated & sent to paper broker.",
-    },
-    {
-      timestamp: "09:46:03",
-      event_type: "FILL_PROCESSED",
-      actor: "PAPER_BROKER",
-      details: "Fill FIL-20261106-001 processed: 75 shares @ 143.00. Position initialized.",
-    },
-    {
-      timestamp: "10:15:00",
-      event_type: "RISK_EVALUATION",
-      actor: "RISK_ENGINE",
-      details: "MTM ₹862.50 evaluated. Circuit breaker: OK (Buffer: ₹3,862.50). Profit trigger: ARMED.",
-    },
-  ]);
+  // Real immutable audit events from backend repository
+  const [auditEvents, setAuditEvents] = useState<AuditEventItem[]>([]);
 
   const loadData = async () => {
     try {
-      const [rRes, recRes] = await Promise.allSettled([
+      const [rRes, recRes, aRes] = await Promise.allSettled([
         api.getRiskSnapshot(),
         api.getLatestReconciliation(),
+        api.getAuditEvents(50),
       ]);
       if (rRes.status === "fulfilled") setRisk(rRes.value);
       if (recRes.status === "fulfilled") setReconciliation(recRes.value);
+      if (aRes.status === "fulfilled" && Array.isArray(aRes.value)) setAuditEvents(aRes.value);
     } catch (err) {
       console.error("Failed to load risk telemetry:", err);
     } finally {
@@ -103,7 +72,7 @@ export default function RiskPage() {
     }
   };
 
-  const netMtm = risk ? parseFloat(String(risk.total_mtm)) : 862.5;
+  const netMtm = risk ? parseFloat(String(risk.total_mtm)) : 0.0;
   const maxLoss = risk ? parseFloat(String(risk.max_daily_loss_limit || 3000.0)) : 3000.0;
   const profitFloor = risk ? parseFloat(String(risk.profit_floor)) : 0.0;
   const profitTrigger = 3000.0;
@@ -321,18 +290,30 @@ export default function RiskPage() {
               </tr>
             </thead>
             <tbody className="divide-y divide-[#162030]">
-              {auditEvents.map((evt, idx) => (
-                <tr key={idx} className="hover:bg-[#121824]/50">
-                  <td className="py-2.5 text-slate-400 text-[11px]">{evt.timestamp}</td>
-                  <td className="py-2.5">
-                    <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-[#162030] text-cyan-300">
-                      {evt.event_type}
-                    </span>
+              {auditEvents.length === 0 ? (
+                <tr>
+                  <td colSpan={4} className="py-6 text-center text-slate-500">
+                    No audit events recorded yet.
                   </td>
-                  <td className="py-2.5 text-slate-300 font-semibold">{evt.actor}</td>
-                  <td className="py-2.5 text-slate-300">{evt.details}</td>
                 </tr>
-              ))}
+              ) : (
+                auditEvents.map((evt, idx) => {
+                  const detailsText =
+                    typeof evt.details === "object" ? JSON.stringify(evt.details) : String(evt.details || "");
+                  return (
+                    <tr key={evt.event_id || idx} className="hover:bg-[#121824]/50">
+                      <td className="py-2.5 text-slate-400 text-[11px]">{formatISTTime(evt.timestamp)}</td>
+                      <td className="py-2.5">
+                        <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-[#162030] text-cyan-300">
+                          {evt.event_type}
+                        </span>
+                      </td>
+                      <td className="py-2.5 text-slate-300 font-semibold">{evt.component || evt.actor || "ENGINE"}</td>
+                      <td className="py-2.5 text-slate-300">{detailsText}</td>
+                    </tr>
+                  );
+                })
+              )}
             </tbody>
           </table>
         </div>

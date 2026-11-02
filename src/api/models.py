@@ -117,6 +117,7 @@ class CandlesResponse(BaseModel):
     symbol: str
     resolution: str = "1m"
     provenance: str = "DATABASE"
+    data_source: str = "DATABASE"
     is_synthetic: bool = False
     candle_count: int
     candles: List[CandleResponseItem]
@@ -188,6 +189,17 @@ class RiskSnapshotResponse(BaseModel):
     profit_floor: Decimal = Decimal("0.00")
     open_positions_count: int = 0
     is_data_stale: bool = False
+    is_synthetic: bool = False
+    data_source: str = "PAPER_ENGINE"
+
+
+class AuditEventResponseItem(BaseModel):
+    event_id: str
+    session_id: str
+    timestamp: datetime
+    event_type: str
+    component: str
+    details: Dict[str, Any] = Field(default_factory=dict)
 
 
 class KillSwitchRequest(BaseModel):
@@ -250,6 +262,7 @@ class OrderResponseItem(BaseModel):
     updated_at: datetime
     transitions: List[OrderTransitionResponseItem] = Field(default_factory=list)
     fills: List[FillResponseItem] = Field(default_factory=list)
+    is_synthetic: bool = False
 
 
 class PositionResponseItem(BaseModel):
@@ -269,6 +282,7 @@ class PositionResponseItem(BaseModel):
     is_open: bool
     opened_at: datetime
     closed_at: Optional[datetime] = None
+    is_synthetic: bool = False
 
 
 class SquareOffRequest(BaseModel):

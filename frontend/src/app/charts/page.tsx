@@ -15,6 +15,8 @@ const TradingChart = dynamic(
 export default function ChartsPage() {
   const [spotCandles, setSpotCandles] = useState<CandleItem[]>([]);
   const [optionCandles, setOptionCandles] = useState<CandleItem[]>([]);
+  const [isSynthetic, setIsSynthetic] = useState(false);
+  const [provenance, setProvenance] = useState("DATASET");
   const [loading, setLoading] = useState(true);
   const [timeframe, setTimeframe] = useState("1m");
   const [date, setDate] = useState("2026-11-06");
@@ -26,8 +28,14 @@ export default function ChartsPage() {
         api.getCandles("NSE:NIFTY50-INDEX", timeframe),
         api.getCandles("NSE:NIFTY26NOV25000CE", timeframe),
       ]);
-      if (spotRes.status === "fulfilled") setSpotCandles(spotRes.value.candles);
-      if (optRes.status === "fulfilled") setOptionCandles(optRes.value.candles);
+      if (spotRes.status === "fulfilled") {
+        setSpotCandles(spotRes.value.candles);
+        setIsSynthetic(Boolean(spotRes.value.is_synthetic));
+        setProvenance(spotRes.value.provenance || "HISTORICAL_REPLAY");
+      }
+      if (optRes.status === "fulfilled") {
+        setOptionCandles(optRes.value.candles);
+      }
     } catch (err) {
       console.error("Failed to load candles:", err);
     } finally {
@@ -41,6 +49,19 @@ export default function ChartsPage() {
 
   return (
     <div className="space-y-5">
+      {/* Synthetic Dataset Warning / Provenance Banner */}
+      {isSynthetic && (
+        <div className="rounded border border-amber-500/40 bg-amber-950/30 p-2.5 text-xs font-mono text-amber-300 flex items-center justify-between">
+          <div className="flex items-center space-x-2">
+            <span className="px-1.5 py-0.5 rounded bg-amber-900/60 border border-amber-600/40 text-[10px] font-bold">
+              [DATASET: SYNTHETIC SIMULATION ({date})]
+            </span>
+            <span>Historical market replay generated for deterministic NIFTY ORB backtesting & verification.</span>
+          </div>
+          <span className="text-[10px] text-amber-400 font-bold uppercase tracking-wider">{provenance}</span>
+        </div>
+      )}
+
       {/* Chart Control Toolbar */}
       <div className="flex flex-wrap items-center justify-between border-b border-[#1c2638] pb-4 gap-3">
         <div>
@@ -94,14 +115,21 @@ export default function ChartsPage() {
           <span>Loading historical candlestick feeds...</span>
         </div>
       ) : (
-        <TradingChart
-          spotCandles={spotCandles}
-          optionCandles={optionCandles}
-          orbHigh={25045.5}
-          orbLow={24962.1}
-          breakoutTime="2026-11-06T09:46:00+05:30"
-          optionEntryPrice={143.0}
-        />
+        <div className="space-y-4">
+          {optionCandles.length === 0 && (
+            <div className="rounded border border-blue-500/30 bg-blue-950/20 p-2.5 text-xs font-mono text-blue-300">
+              Option derivative candles (NSE:NIFTY26NOV25000CE) are unavailable for this interval. Spot chart is shown.
+            </div>
+          )}
+          <TradingChart
+            spotCandles={spotCandles}
+            optionCandles={optionCandles}
+            orbHigh={25045.5}
+            orbLow={24962.1}
+            breakoutTime="2026-11-06T09:46:00+05:30"
+            optionEntryPrice={143.0}
+          />
+        </div>
       )}
     </div>
   );

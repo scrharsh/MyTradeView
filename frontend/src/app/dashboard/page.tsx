@@ -82,15 +82,26 @@ export default function DashboardPage() {
     }
   };
 
-  const netMtm = risk ? parseFloat(String(risk.total_mtm)) : 862.5;
+  const netMtm = risk ? parseFloat(String(risk.total_mtm)) : 0.0;
   const realizedPnl = risk ? parseFloat(String(risk.realized_pnl)) : 0.0;
-  const unrealizedPnl = risk ? parseFloat(String(risk.unrealized_pnl)) : 862.5;
-  const peakMtm = risk ? parseFloat(String(risk.peak_mtm)) : 1050.0;
+  const unrealizedPnl = risk ? parseFloat(String(risk.unrealized_pnl)) : 0.0;
+  const peakMtm = risk ? parseFloat(String(risk.peak_mtm)) : 0.0;
   const maxLossLimit = risk ? parseFloat(String(risk.max_daily_loss_limit || 3000.0)) : 3000.0;
   const remainingLossBuffer = maxLossLimit + netMtm;
 
   return (
     <div className="space-y-6">
+      {/* Synthetic Dataset Warning Banner */}
+      {risk?.is_synthetic && (
+        <div className="rounded border border-amber-500/40 bg-amber-950/30 p-2.5 text-xs font-mono text-amber-300 flex items-center justify-between">
+          <div className="flex items-center space-x-2">
+            <AlertTriangle className="w-4 h-4 text-amber-400" />
+            <span>[SYNTHETIC TEST DATASET] Real-time figures reflect deterministic paper simulation data.</span>
+          </div>
+          <span className="text-[10px] text-amber-400 font-bold uppercase tracking-wider">PAPER ENVIRONMENT</span>
+        </div>
+      )}
+
       {/* Top Banner / Alerts */}
       {actionMessage && (
         <div className="rounded border border-cyan-500/40 bg-cyan-950/40 p-3 text-xs font-mono text-cyan-200 flex items-center justify-between">
@@ -188,12 +199,14 @@ export default function DashboardPage() {
               {session?.phase || "ACTIVE_TRADING"}
             </div>
             <div className="text-[11px] font-mono text-slate-300 mt-1">
-              ORB: 24,962.10 - 25,045.50
+              ORB: {session?.opening_range?.is_established && session.opening_range.low && session.opening_range.high
+                ? `${Number(session.opening_range.low).toFixed(1)} - ${Number(session.opening_range.high).toFixed(1)}`
+                : session?.opening_range?.is_established ? "ESTABLISHED" : "NOT ESTABLISHED"}
             </div>
           </div>
           <div className="text-[10px] font-mono text-emerald-400 flex items-center space-x-1">
             <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
-            <span>Range Established at 09:45 IST</span>
+            <span>{session?.opening_range?.is_established ? "Range Established at 09:45 IST" : "Range Window: 09:16 - 09:45 IST"}</span>
           </div>
         </div>
       </div>
@@ -288,8 +301,11 @@ export default function DashboardPage() {
 
         {/* System & Market Telemetry (1 Col) */}
         <div className="panel p-4 space-y-4">
-          <div className="border-b border-[#1c2638] pb-2 text-xs font-mono font-bold text-slate-200 uppercase tracking-wider">
-            Market & Infrastructure
+          <div className="border-b border-[#1c2638] pb-2 text-xs font-mono font-bold text-slate-200 uppercase tracking-wider flex items-center justify-between">
+            <span>Market & Infrastructure</span>
+            <span className="text-[9px] px-1.5 py-0.5 rounded bg-blue-950/60 text-blue-300 border border-blue-800">
+              {risk?.is_synthetic ? "SYNTHETIC SIM" : "LIVE FEED"}
+            </span>
           </div>
 
           <div className="space-y-3 font-mono text-xs">
@@ -299,19 +315,25 @@ export default function DashboardPage() {
                 <div className="font-bold text-slate-100">NSE:NIFTY50-INDEX</div>
               </div>
               <div className="text-right">
-                <div className="font-bold text-emerald-400">25,062.40</div>
-                <div className="text-[10px] text-emerald-500">+104.20 (+0.42%)</div>
+                <div className="font-bold text-emerald-400">
+                  {session?.opening_range?.high ? formatNumber(session.opening_range.high, 2) : "25,062.40"}
+                </div>
+                <div className="text-[10px] text-emerald-500">Spot Tracking</div>
               </div>
             </div>
 
             <div className="flex items-center justify-between p-2 rounded bg-[#121824] border border-[#1f293d]">
               <div>
                 <div className="text-slate-400 text-[10px]">RESOLVED OPTION</div>
-                <div className="font-bold text-slate-100">NSE:NIFTY26NOV25000CE</div>
+                <div className="font-bold text-slate-100">
+                  {session?.active_contract_symbol || (positions.length > 0 ? positions[0].symbol : "NSE:NIFTY26NOV25000CE")}
+                </div>
               </div>
               <div className="text-right">
-                <div className="font-bold text-slate-200">154.50</div>
-                <div className="text-[10px] text-emerald-400">+11.50 (+8.04%)</div>
+                <div className="font-bold text-slate-200">
+                  {positions.length > 0 ? formatNumber(positions[0].current_ltp, 2) : "154.50"}
+                </div>
+                <div className="text-[10px] text-emerald-400">Active Leg</div>
               </div>
             </div>
 
