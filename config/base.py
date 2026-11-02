@@ -1,17 +1,18 @@
-"""Root application configuration with environment loading and safety validators."""
+"""Root application configuration with environment loading, safety validators, and PAPER default."""
 
 from pathlib import Path
 from typing import Optional
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from src.common.constants import ExecutionMode
-from config.strategy_config import StrategyConfig
+
 from config.broker_config import BrokerConfig
 from config.risk_config import RiskConfig
+from config.strategy_config import StrategyConfig
+from src.common.constants import ExecutionMode
 
 
 class AppConfig(BaseSettings):
-    """Unified application settings with fail-safe validation."""
+    """Unified application settings with fail-safe validation and PAPER default."""
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
@@ -20,8 +21,8 @@ class AppConfig(BaseSettings):
     )
 
     execution_mode: ExecutionMode = Field(
-        default=ExecutionMode.SIMULATION,
-        description="Execution mode: simulation | paper | live"
+        default=ExecutionMode.PAPER,
+        description="Execution mode: simulation | paper | live (Default: PAPER)"
     )
     live_trading_ack: bool = Field(
         default=False,
@@ -61,6 +62,11 @@ class AppConfig(BaseSettings):
                 "live_trading_ack is False. Live execution blocked."
             )
         return v
+
+    def validate_executable_for_trading(self) -> None:
+        """Verify that all unresolved strategy and risk decisions have been explicitly resolved."""
+        self.strategy.validate_executable_for_trading()
+        self.risk.validate_executable_for_trading()
 
 
 def get_config() -> AppConfig:

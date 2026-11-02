@@ -30,3 +30,4 @@ async def test_session(test_engine: AsyncEngine) -> AsyncSession:
 async def state_repo(test_session: AsyncSession) -> StateRepository:
     """Provide a StateRepository bound to test session."""
     return StateRepository(test_session)
+

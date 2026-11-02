@@ -49,3 +49,4 @@ def is_within_time_window(current_time: time, start_time: time, end_time: time) 
 def format_iso_ist(dt: datetime) -> str:
     """Format datetime as ISO string in IST timezone."""
     return to_ist(dt).isoformat()
+

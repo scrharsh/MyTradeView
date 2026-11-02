@@ -109,10 +109,11 @@ class RiskTriggerReason(str, Enum):
 class AuditEventType(str, Enum):
     """Audit trail classification for compliance and post-trade analysis."""
     SESSION_BOOTSTRAP = "SESSION_BOOTSTRAP"
+    CONFIG_LOADED = "CONFIG_LOADED"
     RANGE_ESTABLISHED = "RANGE_ESTABLISHED"
     SIGNAL_EMITTED = "SIGNAL_EMITTED"
     ORDER_SUBMITTED = "ORDER_SUBMITTED"
-    ORDER_STATUS_UPDATE = "ORDER_STATUS_UPDATE"
+    ORDER_STATE_TRANSITION = "ORDER_STATE_TRANSITION"
     ORDER_FILLED = "ORDER_FILLED"
     ORDER_REJECTED = "ORDER_REJECTED"
     ORDER_CANCELLED = "ORDER_CANCELLED"
@@ -123,6 +124,40 @@ class AuditEventType(str, Enum):
     KILL_SWITCH_ACTIVATED = "KILL_SWITCH_ACTIVATED"
     RECONCILIATION_ALERT = "RECONCILIATION_ALERT"
     SESSION_FINALIZED = "SESSION_FINALIZED"
+
+
+# ------------------------------------------------------------------------------
+# Explicitly Unresolved Strategy Semantics Enums
+# ------------------------------------------------------------------------------
+
+class BreakoutConfirmationMode(str, Enum):
+    """Unresolved: Whether breakout triggers on candle close or intrabar price breach."""
+    CANDLE_CLOSE = "candle_close"
+    INTRABAR_TICK = "intrabar_tick"
+
+
+class RangeBoundaryMode(str, Enum):
+    """Unresolved: Exact bar boundary inclusion for the 09:16 to 09:45 window."""
+    UP_TO_0944_CLOSE = "up_to_0944_close"  # 09:16:00 through 09:44:59 (ends at 09:45:00)
+    UP_TO_0945_CLOSE = "up_to_0945_close"  # 09:16:00 through 09:45:59 (ends at 09:46:00)
+
+
+class OrderExecutionStyle(str, Enum):
+    """Unresolved: Option order entry execution style."""
+    MARKET = "market"
+    MARKETABLE_LIMIT = "marketable_limit"
+
+
+class ExpiryDaySelectionMode(str, Enum):
+    """Unresolved: Option contract selection on expiry day."""
+    CURRENT_WEEKLY_0DTE = "current_weekly_0dte"
+    NEXT_WEEKLY = "next_weekly"
+
+
+class ProfitTrailingMode(str, Enum):
+    """Unresolved: Specific profit-protection trailing mechanics."""
+    LOCK_MINIMUM_ONLY = "lock_minimum_only"
+    LOCK_AND_TRAIL = "lock_and_trail"
 
 
 # ------------------------------------------------------------------------------

@@ -1,6 +1,6 @@
 """Unit tests for state machine transitions and invalid transition rejection."""
 
-from datetime import datetime, timezone
+from decimal import Decimal
 import pytest
 
 from src.common.constants import (
@@ -38,11 +38,11 @@ def test_order_valid_lifecycle():
     assert order.status == OrderStatus.PENDING
 
     # PENDING -> FILLED
-    order.apply_transition(OrderStatus.FILLED, filled_qty=25, avg_price=105.50)
+    order.apply_transition(OrderStatus.FILLED, filled_qty=25, avg_price=Decimal("105.50"))
     assert order.status == OrderStatus.FILLED
     assert order.filled_qty == 25
     assert order.remaining_qty == 0
-    assert order.avg_fill_price == 105.50
+    assert order.avg_fill_price == Decimal("105.50")
 
 
 def test_order_invalid_transition_rejected():
@@ -58,7 +58,7 @@ def test_order_invalid_transition_rejected():
         remaining_qty=25,
         tag="TAG_002",
     )
-    order.apply_transition(OrderStatus.FILLED, filled_qty=25, avg_price=100.0)
+    order.apply_transition(OrderStatus.FILLED, filled_qty=25, avg_price=Decimal("100.00"))
     assert order.status == OrderStatus.FILLED
 
     # Attempting to move from terminal FILLED back to PENDING must raise error

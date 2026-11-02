@@ -11,6 +11,17 @@ class ConfigurationError(TradeViewError):
     pass
 
 
+class UnconfirmedStrategySettingError(ConfigurationError):
+    """Raised when execution is attempted while critical strategy decisions remain unconfirmed."""
+    def __init__(self, setting_name: str, description: str):
+        self.setting_name = setting_name
+        self.description = description
+        super().__init__(
+            f"FAIL-CLOSED SAFETY INTERLOCK: Strategy setting '{setting_name}' is unconfirmed. "
+            f"Details: {description}. Execution cannot proceed without explicit configuration."
+        )
+
+
 class InvalidStateTransitionError(TradeViewError):
     """Raised when an illegal state transition is attempted."""
     def __init__(self, entity: str, current_state: str, attempted_state: str):
@@ -24,7 +35,7 @@ class InvalidStateTransitionError(TradeViewError):
 
 class RiskLimitBreachedError(TradeViewError):
     """Raised when a pre-trade or in-trade risk limit has been violated."""
-    def __init__(self, rule: str, current_value: float, threshold_value: float):
+    def __init__(self, rule: str, current_value: str, threshold_value: str):
         self.rule = rule
         self.current_value = current_value
         self.threshold_value = threshold_value

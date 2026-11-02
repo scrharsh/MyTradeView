@@ -1,7 +1,9 @@
-"""State persistence repository and trade journal data access layer."""
+"""State persistence repository and trade journal data access layer using Decimal precision."""
 
 from datetime import date, datetime
+from decimal import Decimal
 from typing import List, Optional
+from uuid import uuid4
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -11,31 +13,69 @@ from src.core.models import (
     BrokerOrder,
     DailyRiskState,
     Fill,
+    Instrument,
+    OptionContract,
     Position,
+    StrategyConfigSnapshot,
     TradingSession,
 )
 from src.storage.schema import (
     AuditEventRecord,
-    DailyMetricsRecord,
+    DailyPnlSnapshotRecord,
     FillRecord,
+    InstrumentRecord,
     OrderRecord,
+    OrderStateTransitionRecord,
     PositionRecord,
+    RiskSnapshotRecord,
     SessionRecord,
+    StrategyConfigRecord,
 )
 
 
 class StateRepository:
-    """Async repository providing ACID state storage and crash recovery."""
+    """Async repository providing ACID state storage, idempotency, and crash recovery."""
 
     def __init__(self, session: AsyncSession):
         self._session = session
 
     # --------------------------------------------------------------------------
-    # 1. Trading Session Management
+    # 1. Strategy Configuration Versioning
+    # --------------------------------------------------------------------------
+
+    async def save_strategy_config(self, config_snapshot: StrategyConfigSnapshot, is_active: bool = True) -> None:
+        """Persist versioned strategy configuration snapshot."""
+        record = StrategyConfigRecord(
+            config_id=config_snapshot.config_id,
+            version=config_snapshot.version,
+            underlying_symbol=config_snapshot.underlying_symbol,
+            config_json=config_snapshot.model_dump(mode="json"),
+            is_active=is_active,
+            created_at=config_snapshot.created_at,
+        )
+        self._session.add(record)
+        await self._session.flush()
+
+    async def get_latest_active_config(self, underlying_symbol: str) -> Optional[StrategyConfigRecord]:
+        """Fetch latest active strategy configuration."""
+        stmt = (
+            select(StrategyConfigRecord)
+            .where(
+                StrategyConfigRecord.underlying_symbol == underlying_symbol,
+                StrategyConfigRecord.is_active.is_(True),
+            )
+            .order_by(StrategyConfigRecord.version.desc())
+            .limit(1)
+        )
+        result = await self._session.execute(stmt)
+        return result.scalar_one_or_none()
+
+    # --------------------------------------------------------------------------
+    # 2. Trading Session Lifecycle
     # --------------------------------------------------------------------------
 
     async def save_session(self, session_model: TradingSession) -> None:
-        """Create or update trading session record."""
+        """Create trading session record."""
         record = SessionRecord(
             session_id=session_model.session_id,
             trading_date=session_model.trading_date,
@@ -77,7 +117,40 @@ class StateRepository:
         await self._session.flush()
 
     # --------------------------------------------------------------------------
-    # 2. Order Management & Fills
+    # 3. Instruments & Option Contracts
+    # --------------------------------------------------------------------------
+
+    async def save_or_update_instrument(self, contract: OptionContract, updated_at: datetime) -> None:
+        """Upsert option contract instrument metadata."""
+        stmt = select(InstrumentRecord).where(InstrumentRecord.symbol == contract.symbol)
+        result = await self._session.execute(stmt)
+        record = result.scalar_one_or_none()
+
+        if record is None:
+            record = InstrumentRecord(
+                symbol=contract.symbol,
+                exchange="NSE",
+                instrument_type="OPTIDX",
+                underlying=contract.underlying,
+                strike=contract.strike,
+                option_type=contract.option_type.value,
+                expiry_date=contract.expiry_date,
+                lot_size=contract.lot_size,
+                tick_size=contract.tick_size,
+                is_active=True,
+                updated_at=updated_at,
+            )
+            self._session.add(record)
+        else:
+            record.strike = contract.strike
+            record.expiry_date = contract.expiry_date
+            record.lot_size = contract.lot_size
+            record.updated_at = updated_at
+
+        await self._session.flush()
+
+    # --------------------------------------------------------------------------
+    # 4. Orders, Transitions & Fills
     # --------------------------------------------------------------------------
 
     async def save_order(self, order: BrokerOrder) -> None:
@@ -104,24 +177,50 @@ class StateRepository:
         self._session.add(record)
         await self._session.flush()
 
+    async def record_order_transition(
+        self,
+        client_order_id: str,
+        from_status: OrderStatus,
+        to_status: OrderStatus,
+        filled_qty: int,
+        avg_price: Decimal,
+        message: Optional[str] = None,
+        timestamp: Optional[datetime] = None,
+    ) -> None:
+        """Record state transition event for an order."""
+        transition_record = OrderStateTransitionRecord(
+            transition_id=f"TRANS_{uuid4().hex[:12]}",
+            client_order_id=client_order_id,
+            from_status=from_status.value,
+            to_status=to_status.value,
+            filled_qty=filled_qty,
+            avg_fill_price=avg_price,
+            message=message,
+            timestamp=timestamp or datetime.now(),
+        )
+        self._session.add(transition_record)
+        await self._session.flush()
+
     async def update_order_status(
         self,
         client_order_id: str,
-        status: OrderStatus,
+        from_status: OrderStatus,
+        to_status: OrderStatus,
         filled_qty: int,
         remaining_qty: int,
-        avg_fill_price: float,
+        avg_fill_price: Decimal,
         broker_order_id: Optional[str] = None,
         status_message: Optional[str] = None,
         updated_at: Optional[datetime] = None,
     ) -> None:
-        """Update existing order status and filled quantities."""
+        """Update existing order status and log state transition."""
+        ts = updated_at or datetime.now()
         values = {
-            "status": status.value,
+            "status": to_status.value,
             "filled_qty": filled_qty,
             "remaining_qty": remaining_qty,
             "avg_fill_price": avg_fill_price,
-            "updated_at": updated_at or datetime.now(),
+            "updated_at": ts,
         }
         if broker_order_id:
             values["broker_order_id"] = broker_order_id
@@ -134,6 +233,17 @@ class StateRepository:
             .values(**values)
         )
         await self._session.execute(stmt)
+
+        # Audit order state transition
+        await self.record_order_transition(
+            client_order_id=client_order_id,
+            from_status=from_status,
+            to_status=to_status,
+            filled_qty=filled_qty,
+            avg_price=avg_fill_price,
+            message=status_message,
+            timestamp=ts,
+        )
         await self._session.flush()
 
     async def record_fill(self, fill: Fill) -> None:
@@ -158,7 +268,7 @@ class StateRepository:
         return result.scalar_one_or_none()
 
     # --------------------------------------------------------------------------
-    # 3. Position Management
+    # 5. Position Management
     # --------------------------------------------------------------------------
 
     async def save_or_update_position(self, position: Position) -> None:
@@ -215,14 +325,13 @@ class StateRepository:
         return list(result.scalars().all())
 
     # --------------------------------------------------------------------------
-    # 4. Daily Metrics & Risk State Snapshots
+    # 6. Risk Snapshots & Daily P&L Snapshots
     # --------------------------------------------------------------------------
 
-    async def record_daily_metrics(self, state: DailyRiskState, timestamp: datetime) -> None:
+    async def record_risk_snapshot(self, state: DailyRiskState, timestamp: datetime) -> None:
         """Record periodic snapshot of strategy risk and MTM."""
-        record = DailyMetricsRecord(
+        record = RiskSnapshotRecord(
             session_id=state.session_id,
-            trading_date=state.trading_date,
             realized_pnl=state.realized_pnl,
             unrealized_pnl=state.unrealized_pnl,
             total_mtm=state.total_mtm,
@@ -236,12 +345,39 @@ class StateRepository:
         self._session.add(record)
         await self._session.flush()
 
+    async def record_daily_pnl_snapshot(
+        self,
+        session_id: str,
+        trading_date: date,
+        net_realized_pnl: Decimal,
+        net_unrealized_pnl: Decimal,
+        gross_mtm: Decimal,
+        peak_profit: Decimal,
+        max_drawdown: Decimal,
+        total_trades_count: int,
+        timestamp: datetime,
+    ) -> None:
+        """Persist end-of-day summary P&L record."""
+        record = DailyPnlSnapshotRecord(
+            session_id=session_id,
+            trading_date=trading_date,
+            net_realized_pnl=net_realized_pnl,
+            net_unrealized_pnl=net_unrealized_pnl,
+            gross_mtm=gross_mtm,
+            peak_profit=peak_profit,
+            max_drawdown=max_drawdown,
+            total_trades_count=total_trades_count,
+            timestamp=timestamp,
+        )
+        self._session.add(record)
+        await self._session.flush()
+
     # --------------------------------------------------------------------------
-    # 5. Audit Trail
+    # 7. Audit Trail
     # --------------------------------------------------------------------------
 
     async def record_audit_event(self, event: AuditEvent) -> None:
-        """Persist immutable audit event."""
+        """Persist immutable audit event without storing sensitive tokens or keys."""
         record = AuditEventRecord(
             event_id=event.event_id,
             session_id=event.session_id,

@@ -4,7 +4,7 @@
 
 `MyTradeView` utilizes **Pydantic v2 Settings** (`pydantic-settings`) for unified, validated configuration management. Configuration is ingested from environment variables and an optional `.env` file located in the project root.
 
-All parameters are strictly typed, checked at application boot, and immutable during runtime.
+All parameters are strictly typed, checked at application boot, and immutable during runtime. Monetary values are modeled using Python's `Decimal` fixed-precision representation to eliminate binary floating-point representation errors.
 
 ---
 
@@ -13,7 +13,7 @@ All parameters are strictly typed, checked at application boot, and immutable du
 | Variable Name | Type | Default Value | Valid Options / Range | Description |
 | :--- | :--- | :--- | :--- | :--- |
 | **Execution Environment** | | | | |
-| `EXECUTION_MODE` | `str` | `simulation` | `simulation`, `paper`, `live` | Operational mode. `simulation` = historical replay; `paper` = live feed + simulated orders; `live` = real broker execution. |
+| `EXECUTION_MODE` | `str` | `paper` | `simulation`, `paper`, `live` | Operational mode. Default is **`paper`**. `simulation` = historical replay; `paper` = live feed + simulated orders; `live` = real broker execution. |
 | `LIVE_TRADING_ACK` | `bool` | `false` | `true`, `false` | Dual-safety interlock flag. `EXECUTION_MODE=live` will raise an immediate error if this flag is not explicitly `true`. |
 | **Strategy Parameters** | | | | |
 | `STRATEGY_UNDERLYING_SYMBOL` | `str` | `NSE:NIFTY50-INDEX` | Valid FYERS Index Symbol | Underlying index to monitor for opening range breakouts. |
@@ -24,14 +24,13 @@ All parameters are strictly typed, checked at application boot, and immutable du
 | `STRATEGY_LOTS` | `int` | `1` | $\ge 1$ | Number of lots to buy on each breakout or reversal entry. |
 | `STRATEGY_LOT_SIZE` | `int` | `25` | $\ge 1$ | Current NSE contract lot size for NIFTY options (e.g. 25, 50, or resolved dynamically). |
 | `STRATEGY_PRODUCT_TYPE` | `str` | `INTRADAY` | `INTRADAY`, `MARGIN` | Product type submitted to FYERS. `INTRADAY` aligns with MIS auto-square-off products. |
-| **Risk Management Parameters** | | | | |
-| `MAX_DAILY_LOSS_LIMIT` | `float` | `3000.0` | Positive float (INR) | Maximum cumulative strategy loss for the session. Reaching this threshold flattens all positions and disallows further trading. |
-| `PROFIT_PROTECTION_TRIGGER` | `float` | `3000.0` | Positive float (INR) | Cumulative strategy profit threshold required to activate the profit protection mechanism. |
-| `PROFIT_PROTECTION_MIN_LOCK` | `float` | `500.0` | Positive float (INR) | Baseline profit floor locked once the trigger is crossed. If MTM falls to this level, positions are exited. |
-| `PROFIT_TRAILING_MODE` | `str` | `lock_and_trail` | `lock_only`, `lock_and_trail` | Trailing mode corresponding to StockMock settings. |
-| `PROFIT_TRAILING_STEP_PROFIT`| `float` | `1000.0` | Positive float (INR) | Step increase in cumulative MTM required to advance the trailing floor (in `lock_and_trail` mode). |
-| `PROFIT_TRAILING_STEP_LOCK` | `float` | `500.0` | Positive float (INR) | Amount by which the locked profit floor increases for each completed profit step. |
-| `MAX_SLIPPAGE_POINTS` | `float` | `5.0` | Positive float (Points) | Maximum acceptable execution slippage between trigger price and fill price. |
+| **Risk Management Parameters (Decimal)** | | | | |
+| `MAX_DAILY_LOSS_LIMIT` | `Decimal` | `3000.00` | Positive Decimal (INR) | Maximum cumulative strategy loss for the session. Reaching this threshold flattens all positions and disallows further trading. |
+| `PROFIT_PROTECTION_TRIGGER` | `Decimal` | `3000.00` | Positive Decimal (INR) | Cumulative strategy profit threshold required to activate the profit protection mechanism. |
+| `PROFIT_PROTECTION_MIN_LOCK` | `Decimal` | `500.00` | Positive Decimal (INR) | Baseline profit floor locked once the trigger is crossed. If MTM falls to this level, positions are exited. |
+| `PROFIT_TRAILING_STEP_PROFIT`| `Decimal` | `1000.00` | Positive Decimal (INR) | Step increase in cumulative MTM required to advance the trailing floor (in `lock_and_trail` mode). |
+| `PROFIT_TRAILING_STEP_LOCK` | `Decimal` | `500.00` | Positive Decimal (INR) | Amount by which the locked profit floor increases for each completed profit step. |
+| `MAX_SLIPPAGE_POINTS` | `Decimal` | `5.00` | Positive Decimal (Points) | Maximum acceptable execution slippage between trigger price and fill price. |
 | `MAX_RETRIES_PER_ORDER` | `int` | `3` | $1 - 5$ | Maximum retry attempts for transient order placement failures before escalating. |
 | **FYERS Broker Credentials** | | | | |
 | `FYERS_CLIENT_ID` | `str` | `None` | String (e.g. `ABC12345-100`) | FYERS App ID generated from the FYERS developer portal. |
@@ -53,59 +52,17 @@ All parameters are strictly typed, checked at application boot, and immutable du
 
 ---
 
-## 3. Pydantic Settings Validation Implementation
+## 3. Explicitly Unresolved Strategy Semantics (Fail-Closed Interlock)
 
-The configuration is organized into modular classes under `config/`:
+To ensure that unconfirmed backtest parameters are never silently defaulted or guessed, the following settings default to `None` and are validated by `validate_executable_for_trading()`:
 
-```python
-from pydantic import Field, field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
-from datetime import time
-from typing import List, Literal
-
-class StrategySettings(BaseSettings):
-    underlying_symbol: str = "NSE:NIFTY50-INDEX"
-    orb_start_time: time = time(9, 16, 0)
-    orb_end_time: time = time(9, 45, 0)
-    mandatory_exit_time: time = time(15, 10, 0)
-    trading_days: List[str] = ["Monday", "Thursday", "Friday"]
-    lots: int = Field(default=1, ge=1)
-    lot_size: int = Field(default=25, ge=1)
-    product_type: Literal["INTRADAY", "MARGIN"] = "INTRADAY"
-
-class RiskSettings(BaseSettings):
-    max_daily_loss_limit: float = Field(default=3000.0, gt=0)
-    profit_protection_trigger: float = Field(default=3000.0, gt=0)
-    profit_protection_min_lock: float = Field(default=500.0, gt=0)
-    profit_trailing_mode: Literal["lock_only", "lock_and_trail"] = "lock_and_trail"
-    profit_trailing_step_profit: float = Field(default=1000.0, gt=0)
-    profit_trailing_step_lock: float = Field(default=500.0, gt=0)
-    max_slippage_points: float = Field(default=5.0, gt=0)
-
-class AppSettings(BaseSettings):
-    model_config = SettingsConfigDict(
-        env_file=".env",
-        env_file_encoding="utf-8",
-        extra="ignore"
-    )
-    
-    execution_mode: Literal["simulation", "paper", "live"] = "simulation"
-    live_trading_ack: bool = False
-    
-    strategy: StrategySettings = StrategySettings()
-    risk: RiskSettings = RiskSettings()
-    
-    @field_validator("live_trading_ack")
-    @classmethod
-    def validate_live_safety(cls, v: bool, info) -> bool:
-        mode = info.data.get("execution_mode")
-        if mode == "live" and not v:
-            raise ValueError(
-                "CRITICAL SAFETY VIOLATION: Execution mode is set to 'live' but "
-                "LIVE_TRADING_ACK is not set to true. Live execution aborted."
-            )
-        return v
-```
+| Decision Key | Allowed Options | StockMock Context | Fail-Closed Policy |
+| :--- | :--- | :--- | :--- |
+| `breakout_confirmation_mode` | `candle_close`, `intrabar_tick` | Whether breakout entry triggers on 1-min bar close or instantaneous tick touch. | Raises `UnconfirmedStrategySettingError` if `None`. |
+| `range_boundary_mode` | `up_to_0944_close`, `up_to_0945_close` | Whether 09:45:00 candle is part of the range (ends at 09:46) or range ends at 09:45:00. | Raises `UnconfirmedStrategySettingError` if `None`. |
+| `order_execution_style` | `market`, `marketable_limit` | Pure market order vs. limit order with slippage offset buffer. | Raises `UnconfirmedStrategySettingError` if `None`. |
+| `expiry_day_selection` | `current_weekly_0dte`, `next_weekly` | On Thursday sessions, whether to trade 0 DTE or roll to next weekly contract. | Raises `UnconfirmedStrategySettingError` if `None`. |
+| `profit_trailing_mode` | `lock_minimum_only`, `lock_and_trail` | Static lock at +₹500 vs. incremental step trailing. | Raises `UnconfirmedStrategySettingError` if `None`. |
 
 ---
 
@@ -114,4 +71,3 @@ class AppSettings(BaseSettings):
 1. **Zero Secret Check-ins:** The `.env` file is excluded via `.gitignore`. An `.env.example` file is maintained with placeholder values only.
 2. **Access Token Refresh:** FYERS access tokens expire every 24 hours. Tokens are obtained through an explicit authorization script (`src/broker/auth.py`), serialized into `./secrets/fyers_token.json` with restricted filesystem permissions (`chmod 600`), and never logged.
 3. **Structured Log Sanitization:** The logging subsystem intercepts log records and redacts fields matching regex patterns for API keys, secret hashes, access tokens, and phone numbers.
-

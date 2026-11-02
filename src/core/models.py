@@ -1,6 +1,7 @@
-"""Comprehensive domain models for the automated trading platform."""
+"""Comprehensive domain models for the automated trading platform using Decimal precision."""
 
 from datetime import date, datetime, time
+from decimal import Decimal
 from typing import Any, Dict, Optional
 from uuid import uuid4
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -21,24 +22,42 @@ from src.common.constants import (
     can_transition_strategy,
 )
 from src.common.exceptions import InvalidStateTransitionError
-from src.common.time_utils import now_ist, now_utc, to_utc
+from src.common.time_utils import now_utc, to_utc
 
 
 # ------------------------------------------------------------------------------
-# 1. Trading Session & Market Hours
+# 1. Trading Session & Strategy Configuration Version
 # ------------------------------------------------------------------------------
 
 class TradingSession(BaseModel):
-    """Trading session model tracking lifecycle and operational mode."""
+    """Trading session model tracking lifecycle and operational mode (Default: PAPER)."""
     model_config = ConfigDict(frozen=True)
 
     session_id: str = Field(description="Unique session identifier, e.g. SESSION_20261102")
     trading_date: date = Field(description="Calendar date of trading session")
-    execution_mode: ExecutionMode = Field(default=ExecutionMode.SIMULATION)
+    execution_mode: ExecutionMode = Field(default=ExecutionMode.PAPER)
     phase: SessionPhase = Field(default=SessionPhase.PRE_MARKET)
     is_active: bool = Field(default=True)
     started_at: datetime = Field(default_factory=now_utc)
     ended_at: Optional[datetime] = Field(default=None)
+
+
+class StrategyConfigSnapshot(BaseModel):
+    """Versioned snapshot of strategy configuration for auditing."""
+    model_config = ConfigDict(frozen=True)
+
+    config_id: str = Field(default_factory=lambda: f"CFG_{uuid4().hex[:12]}")
+    version: int = Field(default=1, ge=1)
+    underlying_symbol: str = "NSE:NIFTY50-INDEX"
+    orb_start_time: time = time(9, 16, 0)
+    orb_end_time: time = time(9, 45, 0)
+    mandatory_exit_time: time = time(15, 10, 0)
+    lots: int = 1
+    lot_size: int = 25
+    max_daily_loss_limit: Decimal = Decimal("3000.00")
+    profit_protection_trigger: Decimal = Decimal("3000.00")
+    profit_protection_min_lock: Decimal = Decimal("500.00")
+    created_at: datetime = Field(default_factory=now_utc)
 
 
 # ------------------------------------------------------------------------------
@@ -46,15 +65,15 @@ class TradingSession(BaseModel):
 # ------------------------------------------------------------------------------
 
 class MarketTick(BaseModel):
-    """Normalized real-time market tick."""
+    """Normalized real-time market tick using Decimal price."""
     model_config = ConfigDict(frozen=True)
 
     symbol: str = Field(description="Instrument symbol, e.g. NSE:NIFTY50-INDEX")
-    ltp: float = Field(gt=0, description="Last traded price")
+    ltp: Decimal = Field(gt=0, description="Last traded price")
     volume: int = Field(default=0, ge=0)
     timestamp: datetime = Field(description="Timestamp of tick arrival in UTC")
-    bid_price: Optional[float] = Field(default=None, ge=0)
-    ask_price: Optional[float] = Field(default=None, ge=0)
+    bid_price: Optional[Decimal] = Field(default=None, ge=0)
+    ask_price: Optional[Decimal] = Field(default=None, ge=0)
 
     @field_validator("timestamp")
     @classmethod
@@ -63,16 +82,21 @@ class MarketTick(BaseModel):
 
 
 class Candle(BaseModel):
-    """OHLCV candlestick bar."""
+    """OHLCV candlestick bar using Decimal prices."""
     model_config = ConfigDict(frozen=True)
 
     symbol: str
     timestamp: datetime = Field(description="Bar start timestamp in UTC")
-    open: float = Field(gt=0)
-    high: float = Field(gt=0)
-    low: float = Field(gt=0)
-    close: float = Field(gt=0)
+    open: Decimal = Field(gt=0)
+    high: Decimal = Field(gt=0)
+    low: Decimal = Field(gt=0)
+    close: Decimal = Field(gt=0)
     volume: int = Field(default=0, ge=0)
+
+    @field_validator("timestamp")
+    @classmethod
+    def ensure_timezone_aware(cls, v: datetime) -> datetime:
+        return to_utc(v)
 
     @model_validator(mode="after")
     def validate_candle_bounds(self) -> "Candle":
@@ -84,20 +108,15 @@ class Candle(BaseModel):
             raise ValueError(f"Low ({self.low}) must be <= open ({self.open}) and close ({self.close})")
         return self
 
-    @field_validator("timestamp")
-    @classmethod
-    def ensure_timezone_aware(cls, v: datetime) -> datetime:
-        return to_utc(v)
-
 
 class OpeningRange(BaseModel):
-    """State of the strategy opening range."""
+    """State of the strategy opening range using Decimal high and low."""
     symbol: str = "NSE:NIFTY50-INDEX"
     session_date: date
     start_time: time = time(9, 16, 0)
     end_time: time = time(9, 45, 0)
-    high: Optional[float] = None
-    low: Optional[float] = None
+    high: Optional[Decimal] = None
+    low: Optional[Decimal] = None
     is_established: bool = False
     candle_count: int = 0
 
@@ -114,29 +133,42 @@ class OpeningRange(BaseModel):
         if self.high is not None and self.low is not None:
             self.is_established = True
 
-    def is_broken_above(self, price: float) -> bool:
+    def is_broken_above(self, price: Decimal) -> bool:
         """Check if price breaks strictly above range high."""
         return self.is_established and self.high is not None and price > self.high
 
-    def is_broken_below(self, price: float) -> bool:
+    def is_broken_below(self, price: Decimal) -> bool:
         """Check if price breaks strictly below range low."""
         return self.is_established and self.low is not None and price < self.low
 
 
 # ------------------------------------------------------------------------------
-# 3. Instrument & Option Contract
+# 3. Instrument & Option Contract Metadata
 # ------------------------------------------------------------------------------
 
+class Instrument(BaseModel):
+    """General instrument metadata."""
+    model_config = ConfigDict(frozen=True)
+
+    symbol: str = Field(description="Trading symbol, e.g. NSE:NIFTY50-INDEX")
+    exchange: str = "NSE"
+    instrument_type: str = "INDEX"  # INDEX, OPTIDX, FUTIDX
+    tick_size: Decimal = Decimal("0.05")
+    lot_size: int = Field(default=25, ge=1)
+    is_active: bool = True
+
+
 class OptionContract(BaseModel):
-    """Option contract model representing resolved weekly derivative."""
+    """Option contract model representing resolved derivative."""
     model_config = ConfigDict(frozen=True)
 
     symbol: str = Field(description="FYERS trading symbol, e.g. NSE:NIFTY26N0624500CE")
     underlying: str = Field(default="NSE:NIFTY50-INDEX")
-    strike: float = Field(gt=0)
+    strike: Decimal = Field(gt=0)
     option_type: OptionType
     expiry_date: date
     lot_size: int = Field(default=25, ge=1)
+    tick_size: Decimal = Decimal("0.05")
 
 
 # ------------------------------------------------------------------------------
@@ -151,7 +183,7 @@ class StrategySignal(BaseModel):
     session_id: str
     timestamp: datetime = Field(default_factory=now_utc)
     signal_type: SignalType
-    underlying_price: float = Field(gt=0)
+    underlying_price: Decimal = Field(gt=0)
     target_contract: Optional[OptionContract] = None
     reason: str
     sequence_number: int = Field(ge=1)
@@ -172,8 +204,8 @@ class OrderRequest(BaseModel):
     order_type: OrderType = OrderType.MARKET
     qty: int = Field(gt=0)
     product_type: ProductType = ProductType.INTRADAY
-    limit_price: float = Field(default=0.0, ge=0)
-    stop_price: float = Field(default=0.0, ge=0)
+    limit_price: Decimal = Field(default=Decimal("0.00"), ge=0)
+    stop_price: Decimal = Field(default=Decimal("0.00"), ge=0)
     tag: str = Field(max_length=20, description="FYERS order tag for client reconciliation")
     created_at: datetime = Field(default_factory=now_utc)
 
@@ -187,7 +219,7 @@ class Fill(BaseModel):
     broker_order_id: Optional[str] = None
     symbol: str
     side: OrderSide
-    fill_price: float = Field(gt=0)
+    fill_price: Decimal = Field(gt=0)
     fill_qty: int = Field(gt=0)
     timestamp: datetime = Field(default_factory=now_utc)
 
@@ -205,8 +237,8 @@ class BrokerOrder(BaseModel):
     filled_qty: int = Field(default=0, ge=0)
     remaining_qty: int = Field(ge=0)
     status: OrderStatus = OrderStatus.NEW
-    avg_fill_price: float = Field(default=0.0, ge=0)
-    limit_price: float = Field(default=0.0, ge=0)
+    avg_fill_price: Decimal = Field(default=Decimal("0.00"), ge=0)
+    limit_price: Decimal = Field(default=Decimal("0.00"), ge=0)
     tag: str
     status_message: Optional[str] = None
     submitted_at: datetime = Field(default_factory=now_utc)
@@ -223,7 +255,7 @@ class BrokerOrder(BaseModel):
         self,
         new_status: OrderStatus,
         filled_qty: Optional[int] = None,
-        avg_price: Optional[float] = None,
+        avg_price: Optional[Decimal] = None,
         message: Optional[str] = None,
         timestamp: Optional[datetime] = None,
     ) -> None:
@@ -247,7 +279,7 @@ class BrokerOrder(BaseModel):
 
 
 class Position(BaseModel):
-    """Position tracker tracking net quantity, cash flow, and MTM."""
+    """Position tracker tracking net quantity, cash flow, and MTM using Decimal precision."""
     position_id: str = Field(default_factory=lambda: f"POS_{uuid4().hex[:12]}")
     session_id: str
     symbol: str
@@ -255,27 +287,28 @@ class Position(BaseModel):
     net_qty: int = 0
     buy_qty: int = 0
     sell_qty: int = 0
-    total_buy_val: float = 0.0
-    total_sell_val: float = 0.0
-    avg_buy_price: float = 0.0
-    avg_sell_price: float = 0.0
-    current_ltp: float = 0.0
-    realized_pnl: float = 0.0
-    unrealized_pnl: float = 0.0
+    total_buy_val: Decimal = Field(default_factory=lambda: Decimal("0.00"))
+    total_sell_val: Decimal = Field(default_factory=lambda: Decimal("0.00"))
+    avg_buy_price: Decimal = Field(default_factory=lambda: Decimal("0.00"))
+    avg_sell_price: Decimal = Field(default_factory=lambda: Decimal("0.00"))
+    current_ltp: Decimal = Field(default_factory=lambda: Decimal("0.00"))
+    realized_pnl: Decimal = Field(default_factory=lambda: Decimal("0.00"))
+    unrealized_pnl: Decimal = Field(default_factory=lambda: Decimal("0.00"))
     is_open: bool = False
     opened_at: Optional[datetime] = None
     closed_at: Optional[datetime] = None
 
     def apply_fill(self, fill: Fill) -> None:
-        """Update position from an executed fill report."""
+        """Update position from an executed fill report using Decimal arithmetic."""
+        qty_dec = Decimal(fill.fill_qty)
         if fill.side == OrderSide.BUY:
             self.buy_qty += fill.fill_qty
-            self.total_buy_val += fill.fill_price * fill.fill_qty
-            self.avg_buy_price = self.total_buy_val / self.buy_qty
+            self.total_buy_val += fill.fill_price * qty_dec
+            self.avg_buy_price = (self.total_buy_val / Decimal(self.buy_qty)).quantize(Decimal("0.0001"))
         else:
             self.sell_qty += fill.fill_qty
-            self.total_sell_val += fill.fill_price * fill.fill_qty
-            self.avg_sell_price = self.total_sell_val / self.sell_qty
+            self.total_sell_val += fill.fill_price * qty_dec
+            self.avg_sell_price = (self.total_sell_val / Decimal(self.sell_qty)).quantize(Decimal("0.0001"))
 
         self.net_qty = self.buy_qty - self.sell_qty
 
@@ -285,7 +318,7 @@ class Position(BaseModel):
         # Calculate realized P&L on closed portion
         closed_qty = min(self.buy_qty, self.sell_qty)
         if closed_qty > 0:
-            self.realized_pnl = (self.avg_sell_price - self.avg_buy_price) * closed_qty
+            self.realized_pnl = ((self.avg_sell_price - self.avg_buy_price) * Decimal(closed_qty)).quantize(Decimal("0.01"))
 
         self.is_open = self.net_qty != 0
         if not self.is_open and closed_qty > 0:
@@ -293,18 +326,19 @@ class Position(BaseModel):
 
         self.update_ltp(fill.fill_price)
 
-    def update_ltp(self, ltp: float) -> None:
+    def update_ltp(self, ltp: Decimal) -> None:
         """Recompute unrealized P&L using current last traded price."""
         self.current_ltp = ltp
+        net_dec = Decimal(self.net_qty)
         if self.net_qty > 0:
-            self.unrealized_pnl = (ltp - self.avg_buy_price) * self.net_qty
+            self.unrealized_pnl = ((ltp - self.avg_buy_price) * net_dec).quantize(Decimal("0.01"))
         elif self.net_qty < 0:
-            self.unrealized_pnl = (self.avg_sell_price - ltp) * abs(self.net_qty)
+            self.unrealized_pnl = ((self.avg_sell_price - ltp) * abs(net_dec)).quantize(Decimal("0.01"))
         else:
-            self.unrealized_pnl = 0.0
+            self.unrealized_pnl = Decimal("0.00")
 
     @property
-    def total_pnl(self) -> float:
+    def total_pnl(self) -> Decimal:
         """Total P&L (realized + unrealized)."""
         return self.realized_pnl + self.unrealized_pnl
 
@@ -314,19 +348,19 @@ class Position(BaseModel):
 # ------------------------------------------------------------------------------
 
 class ProfitProtectionState(BaseModel):
-    """Dynamic profit-protection and trailing floor tracking state."""
+    """Dynamic profit-protection and trailing floor tracking state using Decimal."""
     is_activated: bool = False
-    current_floor: float = 0.0
-    peak_mtm: float = 0.0
+    current_floor: Decimal = Decimal("0.00")
+    peak_mtm: Decimal = Decimal("0.00")
     step_count: int = 0
 
     def evaluate(
         self,
-        current_mtm: float,
-        trigger_profit: float = 3000.0,
-        min_lock: float = 500.0,
-        step_profit: float = 1000.0,
-        step_lock: float = 500.0,
+        current_mtm: Decimal,
+        trigger_profit: Decimal = Decimal("3000.00"),
+        min_lock: Decimal = Decimal("500.00"),
+        step_profit: Decimal = Decimal("1000.00"),
+        step_lock: Decimal = Decimal("500.00"),
         mode: str = "lock_and_trail",
     ) -> bool:
         """
@@ -348,7 +382,7 @@ class ProfitProtectionState(BaseModel):
                 new_steps = int(additional_profit // step_profit)
                 if new_steps > self.step_count:
                     self.step_count = new_steps
-                    self.current_floor = min_lock + (new_steps * step_lock)
+                    self.current_floor = min_lock + (Decimal(new_steps) * step_lock)
 
         # Breach condition: active and MTM retreats to or below floor
         if self.is_activated and current_mtm <= self.current_floor:
@@ -358,21 +392,21 @@ class ProfitProtectionState(BaseModel):
 
 
 class DailyRiskState(BaseModel):
-    """Real-time risk management state for the trading session."""
+    """Real-time risk management state for the trading session using Decimal precision."""
     session_id: str
     trading_date: date
-    max_loss_limit: float = 3000.0
-    realized_pnl: float = 0.0
-    unrealized_pnl: float = 0.0
-    total_mtm: float = 0.0
-    peak_mtm: float = 0.0
+    max_loss_limit: Decimal = Decimal("3000.00")
+    realized_pnl: Decimal = Decimal("0.00")
+    unrealized_pnl: Decimal = Decimal("0.00")
+    total_mtm: Decimal = Decimal("0.00")
+    peak_mtm: Decimal = Decimal("0.00")
     is_kill_switch_active: bool = False
     kill_switch_reason: Optional[RiskTriggerReason] = None
     kill_switch_time: Optional[datetime] = None
     profit_protection: ProfitProtectionState = Field(default_factory=ProfitProtectionState)
     can_trade: bool = True
 
-    def update_mtm(self, realized: float, unrealized: float) -> None:
+    def update_mtm(self, realized: Decimal, unrealized: Decimal) -> None:
         """Update MTM and check for hard loss threshold violation."""
         self.realized_pnl = realized
         self.unrealized_pnl = unrealized
@@ -381,7 +415,7 @@ class DailyRiskState(BaseModel):
         if self.total_mtm > self.peak_mtm:
             self.peak_mtm = self.total_mtm
 
-        # Check hard loss kill-switch: total_mtm <= -max_loss_limit
+        # Check hard loss kill-switch: total_mtm <= -abs(max_loss_limit)
         if self.total_mtm <= -abs(self.max_loss_limit):
             self.trigger_kill_switch(RiskTriggerReason.DAILY_LOSS_LIMIT_BREACHED)
 

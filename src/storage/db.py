@@ -69,3 +69,4 @@ async def get_session(session_factory: async_sessionmaker[AsyncSession]) -> Asyn
         except Exception:
             await session.rollback()
             raise
+
