@@ -89,6 +89,7 @@ class OrderRecord(Base):
     filled_qty: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     remaining_qty: Mapped[int] = mapped_column(Integer, nullable=False)
     status: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    oms_status: Mapped[str] = mapped_column(String(32), default="INTENT_CREATED", nullable=True, index=True)
     avg_fill_price: Mapped[Decimal] = mapped_column(Numeric(12, 4), default=Decimal("0.0000"), nullable=False)
     limit_price: Mapped[Decimal] = mapped_column(Numeric(12, 4), default=Decimal("0.0000"), nullable=False)
     tag: Mapped[str] = mapped_column(String(32), nullable=False, index=True)

@@ -64,6 +64,11 @@ class BrokerConnectionError(BrokerError):
     pass
 
 
+class BrokerAuthenticationError(BrokerError):
+    """Raised when broker credentials, app secrets, or access tokens are invalid or expired."""
+    pass
+
+
 class BrokerOrderRejectedError(BrokerError):
     """Raised when an order is explicitly rejected by the broker or exchange RMS."""
     def __init__(self, order_id: str, code: int, message: str):

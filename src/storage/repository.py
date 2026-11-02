@@ -158,8 +158,14 @@ class StateRepository:
     # 4. Orders, Transitions & Fills
     # --------------------------------------------------------------------------
 
-    async def save_order(self, order: BrokerOrder) -> None:
+    async def save_order(self, order: BrokerOrder, oms_status: Optional[str] = None) -> None:
         """Insert newly created order record."""
+        oms_st = oms_status or getattr(order, "oms_status", None)
+        if oms_st and hasattr(oms_st, "value"):
+            oms_st = oms_st.value
+        elif not oms_st:
+            oms_st = "SUBMISSION_PENDING"
+
         record = OrderRecord(
             client_order_id=order.client_order_id,
             broker_order_id=order.broker_order_id,
@@ -172,6 +178,7 @@ class StateRepository:
             filled_qty=order.filled_qty,
             remaining_qty=order.remaining_qty,
             status=order.status.value,
+            oms_status=str(oms_st),
             avg_fill_price=order.avg_fill_price,
             limit_price=order.limit_price,
             tag=order.tag,
@@ -217,10 +224,11 @@ class StateRepository:
         broker_order_id: Optional[str] = None,
         status_message: Optional[str] = None,
         updated_at: Optional[datetime] = None,
+        oms_status: Optional[str] = None,
     ) -> None:
         """Update existing order status and log state transition."""
         ts = updated_at or datetime.now()
-        values = {
+        values: dict = {
             "status": to_status.value,
             "filled_qty": filled_qty,
             "remaining_qty": remaining_qty,
@@ -231,6 +239,8 @@ class StateRepository:
             values["broker_order_id"] = broker_order_id
         if status_message:
             values["status_message"] = status_message
+        if oms_status:
+            values["oms_status"] = str(oms_status)
 
         stmt = (
             update(OrderRecord)
@@ -266,6 +276,12 @@ class StateRepository:
         self._session.add(record)
         await self._session.flush()
 
+    async def get_order(self, client_order_id: str) -> Optional[OrderRecord]:
+        """Fetch order record by client_order_id."""
+        stmt = select(OrderRecord).where(OrderRecord.client_order_id == client_order_id)
+        result = await self._session.execute(stmt)
+        return result.scalar_one_or_none()
+
     async def get_order_by_tag(self, tag: str) -> Optional[OrderRecord]:
         """Fetch order by client-side tag to prevent duplicate submissions."""
         stmt = select(OrderRecord).where(OrderRecord.tag == tag)
@@ -275,6 +291,10 @@ class StateRepository:
     # --------------------------------------------------------------------------
     # 5. Position Management
     # --------------------------------------------------------------------------
+
+    async def save_position(self, position: Position) -> None:
+        """Alias for save_or_update_position."""
+        await self.save_or_update_position(position)
 
     async def save_or_update_position(self, position: Position) -> None:
         """Upsert strategy position state."""

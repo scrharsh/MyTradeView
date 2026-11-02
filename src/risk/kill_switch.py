@@ -78,6 +78,21 @@ class KillSwitchCoordinator:
         """Immutable audit trail of kill-switch actions."""
         return list(self._audit_log)
 
+    def trigger_kill_switch(
+        self,
+        reason: Any = RiskTriggerReason.MANUAL_OVERRIDE,
+        operator: str = "Admin",
+        details: Optional[Dict[str, Any]] = None,
+        timestamp: Optional[datetime] = None,
+    ) -> bool:
+        """Convenience method / alias for trigger()."""
+        reason_enum = reason if isinstance(reason, RiskTriggerReason) else RiskTriggerReason.MANUAL_OVERRIDE
+        d = dict(details or {})
+        d["operator"] = operator
+        if isinstance(reason, str):
+            d["raw_reason"] = reason
+        return self.trigger(reason=reason_enum, details=d, timestamp=timestamp)
+
     def trigger(
         self,
         reason: RiskTriggerReason,
