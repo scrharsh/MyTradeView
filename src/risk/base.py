@@ -64,3 +64,4 @@ class BaseMtmTracker(ABC):
     def total_mtm(self) -> Decimal:
         """Total strategy MTM (realized + unrealized)."""
         pass
+

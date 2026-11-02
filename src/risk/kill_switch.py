@@ -165,6 +165,21 @@ class KillSwitchCoordinator:
         self._record_audit_event("CLOSURE_CONFIRMED", {"symbol": symbol})
         self._check_all_actions_resolved()
 
+    def record_action_failure(self, identifier: str, action_type: str, reason: str) -> None:
+        """
+        Record failure of an emergency action (e.g. broker rejection of exit order).
+        Crucially does NOT remove item from pending, preventing false lockout finalization.
+        """
+        logger.critical(
+            f"[KillSwitch] Action '{action_type}' FAILED for '{identifier}': {reason}. "
+            "Positions/orders remain un-flattened! Operator manual intervention or emergency retry required."
+        )
+        self._record_audit_event("ACTION_FAILED", {
+            "identifier": identifier,
+            "action_type": action_type,
+            "failure_reason": reason,
+        })
+
     def _check_all_actions_resolved(self) -> None:
         """Verify whether all pending actions have been resolved and lock out session."""
         if self._state == KillSwitchState.EXIT_REQUESTED:

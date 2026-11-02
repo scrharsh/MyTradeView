@@ -36,7 +36,7 @@ class ProfitProtectionEngine:
         min_lock: Decimal = Decimal("500.00"),
         step_profit: Decimal = Decimal("1000.00"),
         step_lock: Decimal = Decimal("500.00"),
-        mode: ProfitTrailingMode = ProfitTrailingMode.LOCK_AND_TRAIL,
+        mode: ProfitTrailingMode = ProfitTrailingMode.LOCK_MINIMUM_ONLY,
     ) -> None:
         if min_lock >= trigger_profit:
             raise ValueError(f"min_lock ({min_lock}) must be strictly less than trigger_profit ({trigger_profit})")
@@ -145,3 +145,4 @@ class ProfitProtectionEngine:
         self._step_count = 0
         self._activated_at = None
         self._exit_triggered_at = None
+

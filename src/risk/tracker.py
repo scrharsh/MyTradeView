@@ -33,6 +33,7 @@ class MtmTracker(BaseMtmTracker):
         self.staleness_threshold_seconds = staleness_threshold_seconds
 
         self._positions: Dict[str, Position] = {}
+        self._closed_positions: List[Position] = []
         self._price_timestamps: Dict[str, datetime] = {}
         self._peak_mtm: Decimal = Decimal("0.00")
         self._risk_events: List[Dict[str, Any]] = []
@@ -60,12 +61,17 @@ class MtmTracker(BaseMtmTracker):
 
     def on_fill(self, fill: Fill) -> None:
         """Apply execution fill report directly to tracked position."""
-        if fill.symbol not in self._positions:
-            self._positions[fill.symbol] = Position(
-                session_id=self.session_id,
-                symbol=fill.symbol,
-            )
-        pos = self._positions[fill.symbol]
+        if fill.symbol in self._positions:
+            pos = self._positions[fill.symbol]
+            # If previous trade on this symbol was completely closed, archive it to isolate new trade lifecycle
+            if not pos.is_open and pos.closed_at is not None and pos.net_qty == 0:
+                self._closed_positions.append(pos)
+                pos = Position(session_id=self.session_id, symbol=fill.symbol)
+                self._positions[fill.symbol] = pos
+        else:
+            pos = Position(session_id=self.session_id, symbol=fill.symbol)
+            self._positions[fill.symbol] = pos
+
         pos.apply_fill(fill)
         self._price_timestamps[fill.symbol] = fill.timestamp
         self._recalculate_peak()
@@ -121,8 +127,10 @@ class MtmTracker(BaseMtmTracker):
 
     @property
     def realized_pnl(self) -> Decimal:
-        """Total realized P&L across all session positions."""
+        """Total realized P&L across all session positions without double counting."""
         total = Decimal("0.00")
+        for pos in self._closed_positions:
+            total += pos.realized_pnl
         for pos in self._positions.values():
             total += pos.realized_pnl
         return total.quantize(Decimal("0.01"))

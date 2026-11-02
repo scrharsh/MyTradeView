@@ -219,3 +219,4 @@ frontend/
 3. **Step 3:** Implement Strategy Builder form with schema-driven validation matching Python `StrategyTemplate`.
 4. **Step 4:** Build WebSocket telemetry pipeline connecting to backend server for live ticks, P&L, and orders.
 5. **Step 5:** Build Backtesting Lab with equity curve, drawdown charts, and StockMock CSV diff tool.
+

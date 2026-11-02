@@ -313,3 +313,4 @@ Clients send subscription frames to filter event types:
   "timestamp": "2026-11-06T05:20:00Z"
 }
 ```
+

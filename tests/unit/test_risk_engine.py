@@ -272,6 +272,33 @@ def test_profit_protection_lock_and_trail_mechanics():
     assert engine.status == ProfitProtectionStatus.EXIT_CONFIRMED
 
 
+def test_profit_protection_default_lock_minimum_only():
+    """Verify default verified StockMock baseline: lock minimum ₹500 floor without unconfirmed trailing."""
+    engine = ProfitProtectionEngine(
+        trigger_profit=Decimal("3000.00"),
+        min_lock=Decimal("500.00"),
+        mode=ProfitTrailingMode.LOCK_MINIMUM_ONLY,
+    )
+
+    # 1. Crosses ₹3,000 -> Floor locked at ₹500
+    engine.evaluate(Decimal("3500.00"))
+    assert engine.is_activated
+    assert engine.current_floor == Decimal("500.00")
+
+    # 2. Profit surges to ₹6,000 -> In LOCK_MINIMUM_ONLY, floor remains strictly at ₹500 (no invented trailing)
+    engine.evaluate(Decimal("6000.00"))
+    assert engine.current_floor == Decimal("500.00")
+    assert engine.step_count == 0
+
+    # 3. MTM drops to ₹600 -> Still above ₹500 floor, no exit
+    assert not engine.evaluate(Decimal("600.00"))
+    assert engine.status == ProfitProtectionStatus.ACTIVATED
+
+    # 4. MTM drops to ₹490 (<= ₹500) -> Exit triggered
+    assert engine.evaluate(Decimal("490.00"))
+    assert engine.status == ProfitProtectionStatus.EXIT_REQUESTED
+
+
 # ==============================================================================
 # 4. Pre-Trade Gatekeeper Multi-Point Validations
 # ==============================================================================
@@ -616,3 +643,123 @@ def test_versioned_strategy_config_progression():
     assert v2.parameters["lots"] == 2
     assert v2.parameters["max_daily_loss_limit"] == "3000.00"
     assert v1.version == 1  # v1 remains immutable
+
+
+def test_mtm_accounting_partial_fills_and_multiple_trades():
+    """Verify precision MTM accounting with partial fills, partial exits, and successive trades."""
+    tracker = MtmTracker(session_id="SESS_PARTIAL")
+
+    # 1. Partial fill 1: Buy 15 @ 100
+    fill1 = Fill(
+        client_order_id="BUY_P1",
+        symbol="NSE:NIFTY26N0624500CE",
+        side=OrderSide.BUY,
+        fill_price=Decimal("100.00"),
+        fill_qty=15,
+        timestamp=datetime.now(timezone.utc),
+    )
+    tracker.on_fill(fill1)
+    assert tracker.open_positions_count == 1
+    assert tracker.total_exposure_quantity == 15
+
+    # 2. Partial fill 2: Buy 10 @ 102 -> Total 25 @ avg 100.80
+    fill2 = Fill(
+        client_order_id="BUY_P2",
+        symbol="NSE:NIFTY26N0624500CE",
+        side=OrderSide.BUY,
+        fill_price=Decimal("102.00"),
+        fill_qty=10,
+        timestamp=datetime.now(timezone.utc),
+    )
+    tracker.on_fill(fill2)
+    assert tracker.total_exposure_quantity == 25
+    pos = tracker._positions["NSE:NIFTY26N0624500CE"]
+    assert pos.avg_buy_price == Decimal("100.8000")
+
+    # 3. Partial exit: Sell 10 @ 110.00 -> Realized P&L = (110 - 100.80) * 10 = +92.00
+    fill_exit1 = Fill(
+        client_order_id="SELL_P1",
+        symbol="NSE:NIFTY26N0624500CE",
+        side=OrderSide.SELL,
+        fill_price=Decimal("110.00"),
+        fill_qty=10,
+        timestamp=datetime.now(timezone.utc),
+    )
+    tracker.on_fill(fill_exit1)
+    assert tracker.realized_pnl == Decimal("92.00")
+    assert pos.net_qty == 15
+    assert pos.is_open
+
+    # 4. Price update at 115.00 -> Unrealized = (115 - 100.80) * 15 = +213.00
+    tracker.update_market_price("NSE:NIFTY26N0624500CE", Decimal("115.00"))
+    assert tracker.unrealized_pnl == Decimal("213.00")
+    assert tracker.total_mtm == Decimal("305.00")  # 92 + 213 = 305.00
+
+    # 5. Full exit of remaining 15 @ 120.00 -> Total realized = 92 + (120 - 100.80) * 15 = 92 + 288 = 380.00
+    fill_exit2 = Fill(
+        client_order_id="SELL_P2",
+        symbol="NSE:NIFTY26N0624500CE",
+        side=OrderSide.SELL,
+        fill_price=Decimal("120.00"),
+        fill_qty=15,
+        timestamp=datetime.now(timezone.utc),
+    )
+    tracker.on_fill(fill_exit2)
+    assert pos.net_qty == 0
+    assert not pos.is_open
+    assert tracker.open_positions_count == 0
+    assert tracker.realized_pnl == Decimal("380.00")
+    assert tracker.unrealized_pnl == Decimal("0.00")
+    assert tracker.total_mtm == Decimal("380.00")
+
+    # 6. Successive trade 2 in same session for same contract: Buy 25 @ 130, Sell 25 @ 140
+    # Must NOT corrupt previous trade's average buy price
+    fill_t2_buy = Fill(
+        client_order_id="BUY_T2",
+        symbol="NSE:NIFTY26N0624500CE",
+        side=OrderSide.BUY,
+        fill_price=Decimal("130.00"),
+        fill_qty=25,
+        timestamp=datetime.now(timezone.utc),
+    )
+    tracker.on_fill(fill_t2_buy)
+    pos2 = tracker._positions["NSE:NIFTY26N0624500CE"]
+    assert pos2.avg_buy_price == Decimal("130.0000")
+    assert pos2.net_qty == 25
+
+    fill_t2_sell = Fill(
+        client_order_id="SELL_T2",
+        symbol="NSE:NIFTY26N0624500CE",
+        side=OrderSide.SELL,
+        fill_price=Decimal("140.00"),
+        fill_qty=25,
+        timestamp=datetime.now(timezone.utc),
+    )
+    tracker.on_fill(fill_t2_sell)
+    assert not pos2.is_open
+    # Total Realized = 380 + (10 * 25) = 380 + 250 = 630.00
+    assert tracker.realized_pnl == Decimal("630.00")
+    assert tracker.total_mtm == Decimal("630.00")
+
+
+def test_kill_switch_action_failure_handling():
+    """Verify that a rejected exit order does NOT transition to LOCKED_OUT, preventing false fill assumptions."""
+    coord = KillSwitchCoordinator(session_id="SESS_FAIL")
+    pos = Position(session_id="SESS_FAIL", symbol="NSE:NIFTY26N0624500CE", net_qty=25, is_open=True)
+
+    coord.trigger(RiskTriggerReason.DAILY_LOSS_LIMIT_BREACHED)
+    assert coord.state == KillSwitchState.TRIGGERED
+
+    _, closures = coord.coordinate_emergency_actions([pos], [])
+    assert closures == ["NSE:NIFTY26N0624500CE"]
+    assert coord.state == KillSwitchState.EXIT_REQUESTED
+
+    # Broker rejects the exit order (e.g. RMS circuit limit or API timeout)
+    coord.record_action_failure("NSE:NIFTY26N0624500CE", "POSITION_EXIT", "Broker RMS rejected order: Outside circuit limits")
+
+    # State MUST remain EXIT_REQUESTED, NOT LOCKED_OUT!
+    assert coord.state == KillSwitchState.EXIT_REQUESTED
+    assert not coord.can_trade
+    assert coord.locked_out_at is None
+    assert any(log["action"] == "ACTION_FAILED" for log in coord.audit_log)
+

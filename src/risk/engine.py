@@ -66,7 +66,7 @@ class RiskEngine:
         )
 
         # 3. Profit Protection Engine (+₹3,000 trigger / +₹500 floor)
-        trailing_mode = risk_config.profit_trailing_mode or ProfitTrailingMode.LOCK_AND_TRAIL
+        trailing_mode = risk_config.profit_trailing_mode or ProfitTrailingMode.LOCK_MINIMUM_ONLY
         self.profit_protection = ProfitProtectionEngine(
             trigger_profit=risk_config.profit_protection_trigger,
             min_lock=risk_config.profit_protection_min_lock,
@@ -215,3 +215,4 @@ class RiskEngine:
         self.circuit_breaker.reset_for_new_session()
         self.profit_protection.reset_for_new_session()
         self.kill_switch.reset_for_new_session(new_session_id)
+

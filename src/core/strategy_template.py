@@ -225,8 +225,8 @@ def get_nifty_orb_template() -> StrategyTemplate:
             "profit_trailing_mode": StrategyParameterDefinition(
                 name="profit_trailing_mode",
                 param_type="str",
-                default_value=ProfitTrailingMode.LOCK_AND_TRAIL.value,
-                description="Profit protection trailing mechanics",
+                default_value=ProfitTrailingMode.LOCK_MINIMUM_ONLY.value,
+                description="Profit protection trailing mode (verified baseline: lock_minimum_only at ₹500 floor once ₹3,000 trigger is crossed)",
                 allowed_values=[m.value for m in ProfitTrailingMode],
             ),
             "profit_trailing_step_profit": StrategyParameterDefinition(
@@ -256,3 +256,4 @@ def get_strategy_template(template_type: StrategyTemplateType) -> StrategyTempla
     if template is None:
         raise ConfigurationError(f"Strategy template '{template_type}' is not registered.")
     return template
+

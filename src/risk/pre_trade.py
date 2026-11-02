@@ -253,3 +253,4 @@ class PreTradeGatekeeper:
             message="Order validated successfully by pre-trade gatekeeper.",
             context={"client_order_id": order_request.client_order_id, "symbol": order_request.symbol, "qty": order_request.qty},
         )
+

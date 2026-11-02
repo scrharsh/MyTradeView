@@ -438,7 +438,7 @@ class NiftyOrbStrategy(BaseStrategy):
                 return signals
 
         # 2. Profit Protection Trigger (+₹3,000 trigger with +₹500 min lock floor)
-        trailing_mode = self.risk_config.profit_trailing_mode or ProfitTrailingMode.LOCK_AND_TRAIL
+        trailing_mode = self.risk_config.profit_trailing_mode or ProfitTrailingMode.LOCK_MINIMUM_ONLY
         floor_breached = self.profit_protection.evaluate(
             current_mtm=self.daily_risk.total_mtm,
             trigger_profit=self.risk_config.profit_protection_trigger,
