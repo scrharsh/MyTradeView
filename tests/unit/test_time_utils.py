@@ -81,3 +81,4 @@ def test_format_iso_ist():
     iso_str = format_iso_ist(utc_dt)
     assert "+05:30" in iso_str
     assert "09:16:00" in iso_str
+
