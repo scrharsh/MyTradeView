@@ -1,138 +1,139 @@
-# Implementation Plan: MyTradeView Execution Platform
+# Implementation Plan: MyTradeView Quantitative Trading Workstation
 
-## 1. Plan Overview
+## 1. Roadmap Overview & Strategic Objectives
 
-This roadmap defines the implementation path to build, verify, backtest, and run the StockMock-faithful NIFTY Opening Range Breakout (ORB) strategy using FYERS API v3. 
+This updated roadmap outlines the development path to transform `MyTradeView` from an automated NIFTY execution engine into a comprehensive **Configuration-Driven Quantitative Trading Workstation**.
 
-The implementation progresses in 10 sequential phases. **No live trading code or active broker orders will be initiated until all preliminary phases, automated test suites, simulation runs, and user approvals are complete.**
+### Core Commitments
+- **Safety-First Fail-Closed Policy:** Live execution remains hard-disabled (`EXECUTION_MODE=paper`) with safety interlocks. No live broker orders are placed until all testing, paper simulations, and explicit user gates are satisfied.
+- **Fidelity to Tested Strategy:** The primary supported template faithfully preserves the StockMock NIFTY ORB specification (09:16-09:45 IST, Mon/Thu/Fri, dynamic lot size, two-phase reversals, -₹3000 daily loss, +₹3000/+₹500 profit protection, 15:10 IST square-off).
+- **Institutional Workstation Architecture:** Clean separation across the 12 target subsystems: Strategy Configuration, Strategy Evaluation, Risk Management, Market Data, Contract Resolution, Order Execution, Backtesting, Paper Trading, Live Broker Execution, Persistence, Backend APIs, and Next.js Frontend Presentation.
 
 ---
 
-## 2. Phase-by-Phase Roadmap
+## 2. Phase-by-Phase Implementation Roadmap
+
+```mermaid
+flowchart LR
+    P1["Phase 1: Foundations\n(Done)"] --> P2["Phase 2: Market Data\n(Done)"]
+    P2 --> P3["Phase 3: Strategy Engine\n(Done)"]
+    P3 --> P4["Phase 4: Risk & Templates\n(Done)"]
+    P4 --> P5["Phase 5: Backtesting Lab\n(Next)"]
+    P5 --> P6["Phase 6: OMS & Simulation"]
+    P6 --> P7["Phase 7: FYERS Broker Adapter"]
+    P7 --> P8["Phase 8: Session Scheduler"]
+    P8 --> P9["Phase 9: FastAPI Backend"]
+    P9 --> P10["Phase 10: Next.js Frontend"]
+    P10 --> P11["Phase 11: Paper Validation"]
+    P11 --> P12["Phase 12: Production Live Gate"]
+```
+
+---
 
 ### Phase 1: Core Domain Entities, Configuration & Database Foundations
-- **Deliverables:**
-  - `src/common/constants.py`: Enums for `ExecutionMode`, `OrderSide`, `OrderType`, `OrderStatus`, `ProductType`, `StrategyState`, `TradingDay`.
-  - `src/core/models.py`: Pydantic / dataclass domain representations (`Tick`, `Candle`, `Signal`, `Order`, `Fill`, `Position`, `DailySession`).
-  - `config/`: Validated schemas using `pydantic-settings` (`StrategySettings`, `BrokerSettings`, `RiskSettings`, `DatabaseSettings`).
-  - `src/storage/db.py` & `src/storage/schema.py`: Async SQLAlchemy tables (`strategy_sessions`, `orders`, `fills`, `positions`, `daily_metrics`, `audit_events`).
-  - Unit tests verifying database migrations, transactional rollbacks, and schema integrity under PostgreSQL and SQLite.
-- **Acceptance Criteria:**
-  - Configurations successfully validate from environment files with invalid values throwing strict Pydantic errors.
-  - Asynchronous CRUD operations tested on SQLite and PostgreSQL.
+- **Status:** **Completed & Verified** (Commits `dc321c4` & `f2db9a4`)
+- **Key Deliverables:**
+  - Strict Pydantic domain models with `Decimal` fixed-precision financial accounting.
+  - Fail-closed configuration schemas with unconfirmed decision interlocks.
+  - SQLAlchemy 2.0 schema (10 tables) supporting PostgreSQL and SQLite.
+  - 30 unit tests covering precision arithmetic, models, configuration, and ACID persistence.
 
 ---
 
-### Phase 2: Market Data Layer & Option Symbol Resolver
-- **Deliverables:**
-  - `src/data/base.py`: Generic `MarketDataProvider` abstract interface.
-  - `src/data/symbol_resolver.py`: 
-    - Automated NIFTY weekly expiry date resolver (Thursday / pre-holiday adjustment).
-    - ATM Strike calculation: $\text{round}(\text{Spot} / 50) \times 50$.
-    - FYERS derivative symbol formatter (e.g., `NSE:NIFTY26N0624500CE`).
-    - Local cache parser for official FYERS Symbol Master CSV (`https://public.fyers.in/sym_details/NSE_FO.csv`).
-  - `src/data/csv_data.py`: Local historical 1-minute candle provider for backtesting.
-  - Unit tests for ATM strike selection, leap years, monthly vs weekly format transitions, and holiday calendars.
-- **Acceptance Criteria:**
-  - Symbol resolver correctly outputs official FYERS contract symbols matching NSE derivative master across arbitrary historical and future dates.
+### Phase 2: Market Data Layer & Option Contract Resolver
+- **Status:** **Completed & Verified** (Commit `24334fe`)
+- **Key Deliverables:**
+  - Abstract `MarketDataProvider` interface and historical offline CSV/Parquet provider.
+  - FYERS `NSE_FO.csv` derivative master parser and `ContractResolver`.
+  - Arithmetic `ROUND_HALF_UP` ATM strike calculation and holiday-adjusted expiry resolution.
+  - Feasibility report (`HISTORICAL_DATA_FEASIBILITY.md`) detailing options data constraints.
+  - 22 unit tests covering ingestion, caching, and contract lookups (52 total passing tests).
 
 ---
 
 ### Phase 3: Strategy Engine & Opening Range Logic
-- **Deliverables:**
-  - `src/strategy/base.py`: Abstract Strategy base class.
-  - `src/strategy/orb_nifty.py`:
-    - Strict day-of-week filter (Monday, Thursday, Friday execution only).
-    - Opening range builder: evaluates bars between 09:16:00 and 09:45:00 IST to establish `OR_HIGH` and `OR_LOW`.
-    - Breakout detection: triggers `ENTER_LONG_CE` when NIFTY Spot breaks above `OR_HIGH`, and `ENTER_LONG_PE` when breaking below `OR_LOW`.
-    - Reversal logic: If `LONG_CE` and price breaks `OR_LOW`, emit `CLOSE_CE` followed by `ENTER_LONG_PE`. If `LONG_PE` and price breaks `OR_HIGH`, emit `CLOSE_PE` followed by `ENTER_LONG_CE`.
-    - EOD mandatory square-off signal emitted at 15:10:00 IST.
-  - Comprehensive unit test suite covering range calculation, breakout triggers, reversal triggers, and day filtering.
-- **Acceptance Criteria:**
-  - Strategy engine produces $100\%$ deterministic signal outputs when replayed with mock tick/candle streams.
+- **Status:** **Completed & Verified** (Commit `dc69c84`)
+- **Key Deliverables:**
+  - `OpeningRangeTracker`: Deterministic range builder with interval semantics (`UP_TO_0944_CLOSE` / `UP_TO_0945_CLOSE`).
+  - `NiftyOrbStrategy`: Breakout entries, atomic two-phase reversal sequencing, idempotency guards, and 15:10 IST square-off.
+  - Trading day filter (Mon, Thu, Fri active; Tue, Wed, Sat, Sun bypassed).
+  - 13 unit tests covering breakouts, reversals, deduplication, and replay parity (65 total passing tests).
 
 ---
 
-### Phase 4: Risk Management Engine & Circuit Breakers
-- **Deliverables:**
-  - `src/risk/engine.py`:
-    - Real-time MTM tracker aggregating realized and unrealized PnL.
-    - Daily Strategy Loss Kill Switch: Fires emergency shutdown when cumulative MTM $\le -₹3,000$.
-    - Profit-Protection Controller: Activates when cumulative MTM $\ge +₹3,000$, enforcing a floor exit if MTM retreats to $+₹500$.
-    - Trailing profit logic support (configurable step-based lock & trail).
-  - `src/risk/pre_trade.py`: Pre-trade checks for order size, session validity, and duplicate submission blocks.
-  - `src/risk/kill_switch.py`: Hard fail-safe handler to cancel open orders, exit active positions, and lock out trading.
-- **Acceptance Criteria:**
-  - Test suite simulates extreme negative slippage and sudden drawdowns, verifying that the kill switch terminates positions immediately and prevents subsequent entries.
+### Phase 4: Risk Management Engine, Configuration-Driven Architecture & Frontend Plan
+- **Status:** **Completed & Verified** (Current Phase)
+- **Key Deliverables:**
+  - **Strategy Templates & Versioning:** `StrategyTemplate` registry and `VersionedStrategyConfig` ensuring strategies are configuration-driven rather than hardcoded.
+  - **Standalone MTM Tracker (`src/risk/tracker.py`):** Fixed-precision accounting with zero double-counting, drawdown tracking, and staleness/invalid price detection.
+  - **Daily Loss Circuit Breaker (`src/risk/circuit_breaker.py`):** -₹3,000 threshold enforcement with duplicate closure suppression and session lockout.
+  - **Profit-Protection Engine (`src/risk/profit_protection.py`):** +₹3,000 trigger with +₹500 floor lock and dynamic step-based trailing.
+  - **Pre-Trade Gatekeeper (`src/risk/pre_trade.py`):** 12-point deterministic validation before orders reach execution adapters.
+  - **Kill-Switch Coordinator (`src/risk/kill_switch.py`):** Explicit state machine managing emergency cancellations and liquidations.
+  - **Unified Facade (`src/risk/engine.py`):** Modular risk engine tying all components together.
+  - **Frontend Plan (`FRONTEND_IMPLEMENTATION_PLAN.md`):** Complete Next.js + Tailwind + TradingView Lightweight Charts blueprint.
+  - **API Contracts (`API_CONTRACTS.md`):** Complete REST OpenAPI and WebSocket telemetry specification.
+  - **Test Suite:** 13 new unit tests (78 total passing tests in 2.79s).
 
 ---
 
-### Phase 5: Backtesting Engine & StockMock Benchmark Calibration
-- **Deliverables:**
-  - `src/backtest/engine.py`: Discrete event-driven backtesting engine capable of replaying 1-minute NIFTY spot and options data.
-  - `src/backtest/portfolio.py`: Simulated portfolio accounting for 1 lot entries, margin requirements, and realistic slippage.
-  - `src/backtest/metrics.py`: Performance reporter computing Net PnL, Max Drawdown, Win Rate, Profit Factor, Average Win/Loss, and session logs.
-  - StockMock comparison harness: Ingestion of StockMock backtest trade export CSVs to verify tick-by-tick parity.
-- **Acceptance Criteria:**
-  - Backtest results on sample historical period match StockMock trade-level entries, exits, and PnL within configured slippage tolerance.
+### Phase 5: Discrete-Event Backtesting Engine & StockMock Benchmark Calibration
+- **Objectives:**
+  - Event-driven backtesting engine replaying 1-minute historical spot and option candles.
+  - Portfolio accounting module supporting 1-lot entries, margin modeling, slippage, and transaction costs.
+  - Comprehensive metrics calculator: Net P&L, Max Drawdown, Sharpe Ratio, Win Rate, Profit Factor, Expectancy.
+  - StockMock comparison harness ingesting backtest trade CSV exports to verify trade-by-trade parity.
 
 ---
 
-### Phase 6: FYERS API v3 Broker Adapter
-- **Deliverables:**
-  - `src/broker/base.py`: Abstract broker interface.
-  - `src/broker/auth.py`: OAuth 2.0 flow helper, token generator, and secure token cache manager.
-  - `src/broker/fyers_adapter.py`:
-    - REST client wrapping `/api/v3/orders/sync`, `/api/v3/orders`, `/api/v3/positions`, `/api/v3/history`, `/api/v3/quotes`.
-    - Real-time WebSocket clients: `FyersDataSocket` for live market ticks, `FyersOrderSocket` for immediate execution updates.
-    - Retry decorator with exponential backoff for transient network issues.
-  - Mock FYERS server / responses for testing without calling live endpoints.
-- **Acceptance Criteria:**
-  - Adapter passes full integration suite against mock FYERS responses with zero unhandled exceptions or connection leakages.
+### Phase 6: Order Management System (OMS) & Execution Simulation Engine
+- **Objectives:**
+  - Stateful `OrderManager` tracking full lifecycle (`NEW` $\to$ `TRANSIT` $\to$ `PENDING` $\to$ `FILLED`).
+  - Simulated execution adapter with realistic fill models (bid/ask matching, spread simulation, slippage).
+  - Client order tag generation and persistent state reconciliation.
 
 ---
 
-### Phase 7: Order Management System (OMS) & Reconciliation Worker
-- **Deliverables:**
-  - `src/oms/order_manager.py`: State machine tracking order states (`NEW`, `TRANSIT`, `PENDING`, `FILLED`, `REJECTED`, `CANCELLED`).
-  - `src/oms/idempotency.py`: Unique tag generation (`order_tag`) ensuring duplicate submissions are rejected at the client and broker level.
-  - Atomic Reversal Execution Handler:
-    1. Send exit order for current leg.
-    2. Await verified fill confirmation (or timeout $\to$ aggressive IOC market exit).
-    3. Send entry order for reverse leg only after confirmation.
-  - `src/oms/reconciliation.py`: Periodic reconciliation worker polling broker positions (`GET /api/v3/positions`) every 5 seconds, flagging discrepancies.
-- **Acceptance Criteria:**
-  - State machine correctly handles partial fills, rejected orders, and out-of-order websocket events without entering invalid states.
+### Phase 7: FYERS API v3 Broker Adapter & WebSocket Integration
+- **Objectives:**
+  - Concrete FYERS broker adapter wrapping REST endpoints (`/api/v3/orders`, `/api/v3/positions`, `/api/v3/quotes`).
+  - Real-time `FyersDataSocket` and `FyersOrderSocket` with auto-reconnection and token refresh helpers.
+  - Mock broker test harness simulating broker API responses and exchange reject codes.
 
 ---
 
-### Phase 8: Scheduler, Session Orchestration & Notification System
-- **Deliverables:**
-  - `src/scheduler/session_manager.py`: Market session scheduler driving pre-market bootstrap, range formation, trading window, and EOD cleanup.
-  - `src/scheduler/runner.py`: Top-level CLI and service orchestrator binding all modules together.
-  - `src/monitoring/alerts.py`: Notification channels (Telegram, Slack, console) for trades, errors, and risk triggers.
-  - `src/monitoring/health.py`: Process heartbeat and watchdog.
-- **Acceptance Criteria:**
-  - Service runs seamlessly through a simulated trading day lifecycle from 09:00:00 to 15:30:00 IST.
+### Phase 8: Scheduling, Market Session Lifecycle & Monitoring
+- **Objectives:**
+  - `SessionManager` orchestrating the daily lifecycle (Pre-market 09:00, ORB 09:16, Trading 09:45, Square-off 15:10, Close 15:30 IST).
+  - Multi-channel alert dispatcher (Telegram, Slack, console).
+  - Process heartbeat and system health monitor.
 
 ---
 
-### Phase 9: Comprehensive Test Suite & Paper Trading Validation
-- **Deliverables:**
-  - Unit tests: $\ge 90\%$ code coverage across all core modules.
-  - End-to-end simulation test: Full synthetic trading week replay containing gaps, volatile reversals, and limit hits.
-  - Paper trading deployment: Running in paper mode (`EXECUTION_MODE=paper`) using live market feeds and simulated broker execution.
-- **Acceptance Criteria:**
-  - System executes in paper mode for multiple live market sessions without any crashes, desynchronization, or duplicate order submissions.
+### Phase 9: Backend API Layer (FastAPI REST & WebSocket Telemetry)
+- **Objectives:**
+  - Implement REST endpoints specified in `API_CONTRACTS.md`.
+  - Implement WebSocket telemetry broadcaster streaming live ticks, order updates, MTM snapshots, and risk events.
 
 ---
 
-### Phase 10: Production Readiness & Live Trading Gate
-- **Deliverables:**
-  - Pre-flight verification checklist.
-  - Live deployment guide with systemd service configuration.
-  - Production database setup on PostgreSQL.
-  - Secrets auditing to guarantee zero token leakage.
-- **Acceptance Criteria:**
-  - User review and explicit approval of all architecture documents, configurations, and risk controls before initiating live executor deployment.
+### Phase 10: Next.js Frontend Workstation & TradingView Lightweight Charts
+- **Objectives:**
+  - Scaffold Next.js 14 project following `FRONTEND_IMPLEMENTATION_PLAN.md`.
+  - Build TradingView Lightweight Charts component with custom ORB overlay shaders and signal markers.
+  - Implement Dashboard, Strategy Builder, Backtesting Lab, and Paper Trading views.
 
+---
+
+### Phase 11: Comprehensive Paper Trading Validation
+- **Objectives:**
+  - Multi-day live paper trading run using real-time FYERS data sockets and simulated order fills.
+  - Verification of zero duplicate orders, zero crashes, and exact risk enforcement under volatile market conditions.
+
+---
+
+### Phase 12: Production Readiness & Live Trading Gate
+- **Objectives:**
+  - Pre-flight compliance checklist.
+  - Production PostgreSQL database deployment.
+  - Explicit multi-factor authorization gate for live broker execution.

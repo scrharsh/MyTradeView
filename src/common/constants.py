@@ -202,3 +202,45 @@ def can_transition_strategy(current: StrategyState, target: StrategyState) -> bo
     if current == target:
         return True
     return target in VALID_STRATEGY_TRANSITIONS.get(current, set())
+
+
+# ------------------------------------------------------------------------------
+# Strategy Template Types & Workstation Configuration
+# ------------------------------------------------------------------------------
+
+class StrategyTemplateType(str, Enum):
+    """Supported strategy templates in the trading workstation."""
+    NIFTY_ORB = "NIFTY_ORB"
+    INTRADAY_STRADDLE = "INTRADAY_STRADDLE"
+    MOMENTUM_BREAKOUT = "MOMENTUM_BREAKOUT"
+
+
+# ------------------------------------------------------------------------------
+# Risk Pre-Trade Validation & Kill-Switch States
+# ------------------------------------------------------------------------------
+
+class RiskRejectReason(str, Enum):
+    """Structured reason codes for pre-trade risk rejections."""
+    KILL_SWITCH_ACTIVE = "KILL_SWITCH_ACTIVE"
+    DAILY_LOSS_BREACHED = "DAILY_LOSS_BREACHED"
+    PROFIT_PROTECTION_LOCKED = "PROFIT_PROTECTION_LOCKED"
+    MANDATORY_EXIT_PASSED = "MANDATORY_EXIT_PASSED"
+    OUTSIDE_TRADING_HOURS = "OUTSIDE_TRADING_HOURS"
+    NON_TRADING_DAY = "NON_TRADING_DAY"
+    STALE_MARKET_DATA = "STALE_MARKET_DATA"
+    INVALID_CONTRACT = "INVALID_CONTRACT"
+    INVALID_LOT_SIZE = "INVALID_LOT_SIZE"
+    INVALID_ORDER_QTY = "INVALID_ORDER_QTY"
+    UNSUPPORTED_ORDER_TYPE = "UNSUPPORTED_ORDER_TYPE"
+    CONFLICTING_ORDER_STATE = "CONFLICTING_ORDER_STATE"
+    DUPLICATE_ORDER = "DUPLICATE_ORDER"
+    EXECUTION_MODE_DISABLED = "EXECUTION_MODE_DISABLED"
+
+
+class KillSwitchState(str, Enum):
+    """Explicit state machine states for the centralized kill switch coordinator."""
+    NORMAL = "NORMAL"
+    TRIGGERED = "TRIGGERED"
+    EXIT_REQUESTED = "EXIT_REQUESTED"
+    LOCKED_OUT = "LOCKED_OUT"
+

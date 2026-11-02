@@ -1,266 +1,187 @@
-# System Architecture Specification: MyTradeView
+# System Architecture Specification: MyTradeView Quantitative Trading Workstation
 
-## 1. Executive Summary
+## 1. Executive Summary & Product Vision
 
-`MyTradeView` is an institutional-grade, event-driven algorithmic trading executor built in Python 3.10+ tailored for automated index options trading on the National Stock Exchange of India (NSE). It interfaces directly with the FYERS brokerage platform via FYERS API v3. 
+`MyTradeView` is an institutional-grade, configuration-driven quantitative algorithmic trading workstation tailored for automated and backtested derivatives strategies on the National Stock Exchange of India (NSE). It interfaces directly with the FYERS brokerage platform via FYERS API v3 and supports offline research via historical market datasets.
 
-The primary objective is the faithful execution of a validated **NIFTY Opening Range Breakout (ORB)** intraday strategy originally modeled and backtested on **StockMock**. The architecture guarantees strict determinism, risk containment, idempotent execution, persistent state reconciliation, and decoupled data providers.
+### The Product Vision: Workstation vs. Hardcoded Bot
+This application is **not** a single hardcoded NIFTY breakout script. It is architected as an extensible trading workstation providing:
+1. **Strategy Template System:** Multi-strategy support using validated, typed templates (with NIFTY ORB as the primary validated template).
+2. **Immutable Versioning:** Strategy configurations are versioned snapshots tied deterministically to backtests and trading sessions.
+3. **Discrete Risk Containment:** Standalone MTM tracking, hard loss circuit breakers (-₹3,000), profit protection (+₹3,000 trigger / +₹500 floor), and centralized pre-trade gatekeeping independent of strategy logic.
+4. **Interactive Visualization:** Next.js + Tailwind CSS frontend featuring TradingView Lightweight Charts with custom opening range and signal overlays.
+5. **Decoupled Execution Pipelines:** Deterministic event replay for historical backtesting, simulated order matching for paper trading, and gated broker execution for live deployment.
 
 ---
 
 ## 2. Core Architectural Principles
 
-1. **Safety-First / Zero Blind Execution:** Live trading is hard-disabled by default (`EXECUTION_MODE=simulation`). Enabling live trading requires explicit dual-flag activation in configuration.
-2. **Decoupled Architecture:** Clean separation of concerns across 12 discrete, independently testable modules. The Strategy Engine has zero knowledge of FYERS-specific APIs; it consumes abstract data events and emits strategy signals.
-3. **Strict Order Fill Verification:** Never assume order submission implies fill. Order execution is an asynchronous state machine driven by exchange fill events and verified via broker reconciliation.
-4. **Idempotency & Duplicate Prevention:** Every order carries an idempotent client order identifier (`order_tag`). Process restarts recover state from PostgreSQL without duplicate order firing.
-5. **Reversal Sequencing:** When reversing positions (CE $\to$ PE or PE $\to$ CE), the engine enforces atomic sequence: **Close Existing Position $\to$ Confirm Fill $\to$ Open New Position**. Naked double-exposure or simultaneous opposing positions are physically prevented.
-6. **No API Hallucinations:** All broker interactions adhere strictly to verified FYERS API v3 endpoints, parameter types, error payloads, and websocket schemas.
+1. **Safety-First Fail-Closed Interlocks:** Execution mode defaults to **`PAPER`** (`simulation`/`paper`). Live trading is physically disabled and requires explicit dual-flag server authorization (`LIVE_TRADING_ACK=true`) plus pre-flight verification.
+2. **Fixed-Precision Financial Calculations:** All prices, strikes, quantities, P&L, and MTM calculations use Python `Decimal` with explicit arithmetic rounding (`ROUND_HALF_UP`), eliminating binary floating-point rounding errors.
+3. **Template-Based Strategy Modularity:** Strategies are declared as configuration-driven parameter sets evaluated against standard strategy templates, allowing future additions (e.g. Intraday Straddles, Momentum) without code rewrites.
+4. **Decoupled Tier-1 and Tier-2 Risk Gates:** Risk rules operate independently of strategy signal generation. Pre-trade orders are audited by a central gatekeeper, while in-trade positions are monitored by standalone MTM trackers and kill switches.
+5. **Two-Phase Atomic Reversal Sequencing:** Physical prevention of simultaneous opposing option positions or naked double-exposure: **Close Existing Position $\to$ Confirm Fill $\to$ Open Replacement Position**.
+6. **Zero Broker Secret Check-in:** FYERS developer credentials and OAuth tokens reside strictly in secure local environments (`./secrets/`) and are never dispatched to frontend web clients.
 
 ---
 
-## 3. High-Level System Architecture
+## 3. High-Level Workstation Architecture
 
 ```mermaid
 flowchart TD
-    subgraph MarketDataLayer["Market Data & Resolution Layer"]
-        MDFactor["Historical / Live Feed Provider"]
-        WS["FYERS Data Socket (Live)"]
-        CSV["CSV / DB Provider (Backtest)"]
-        SR["Option Contract & Expiry Resolver"]
-        MDFactor --> WS
-        MDFactor --> CSV
+    subgraph PresentationLayer["12. Frontend Presentation Layer (Next.js + Tailwind)"]
+        DashboardUI["Live Dashboard\n(MTM, Orders, Telemetry)"]
+        StratBuilderUI["Strategy Studio\n(Templates, Versions)"]
+        ChartUI["TradingView Lightweight Charts\n(ORB Overlay, Signals, Replay)"]
+        BacktestUI["Backtest Lab\n(Equity Curve, StockMock Parity)"]
     end
 
-    subgraph StrategyLayer["Strategy & Decision Core"]
-        SM["Market Session Manager\n(IST Schedule 09:16 - 15:10)"]
-        SE["NIFTY ORB Strategy Engine"]
-        SG["Signal Generator\n(Breakout / Reversal)"]
-        SM --> SE
-        MDFactor --> SE
-        SR --> SE
-        SE --> SG
+    subgraph ApiLayer["11. Backend API Layer (FastAPI)"]
+        REST["REST API (OpenAPI)\n(/strategies, /market-data, /backtest)"]
+        WS["WebSocket Telemetry Engine\n(/ws/telemetry: Ticks, Signals, Fills)"]
+        REST <--> PresentationLayer
+        WS --> PresentationLayer
     end
 
-    subgraph RiskLayer["Risk Management Engine"]
-        RM["Pre-Trade Risk Validator"]
-        KS["Kill Switch & Circuit Breakers"]
-        PP["Profit-Protection & MTM Tracker\n(-₹3000 Loss / +₹3000 Profit Lock)"]
-        SG --> RM
-        SE -.-> PP
-        PP --> KS
-        KS --> RM
+    subgraph StrategySubsystems["1 & 2. Strategy Definition & Evaluation Core"]
+        Templates["Strategy Template Registry\n(NIFTY_ORB, Straddles)"]
+        ConfigVersions["Versioned Strategy Config\n(Immutable Snapshots)"]
+        StratEngine["Strategy Engine\n(NiftyOrbStrategy)"]
+        RangeTracker["Opening Range Tracker\n(09:16 - 09:45 IST)"]
+        Templates --> ConfigVersions
+        ConfigVersions --> StratEngine
+        RangeTracker --> StratEngine
     end
 
-    subgraph OMSLayer["Order Management & Execution Layer"]
-        OMS["Order Management System (OMS)\n(State Machine & Idempotency)"]
-        REC["Broker Reconciliation Worker\n(5s Polling vs WebSocket Feeds)"]
-        BA["Broker Adapter Interface"]
-        FyersAdapter["FYERS API v3 Adapter\n(REST + Order Socket)"]
-        SimAdapter["Simulated Broker Adapter\n(Slippage & Fill Models)"]
-        RM --> OMS
-        OMS --> BA
-        BA --> FyersAdapter
-        BA --> SimAdapter
-        FyersAdapter -.-> REC
-        REC --> OMS
+    subgraph RiskSubsystems["3. Standalone Risk Management Layer"]
+        PreTradeGate["Pre-Trade Risk Gatekeeper\n(Calendar, LotSize, Staleness)"]
+        MtmTrackerCore["MTM Tracker (Decimal)\n(Realized + Unrealized)"]
+        LossBreaker["Daily Loss Circuit Breaker\n(-₹3,000 Hard Limit)"]
+        ProfitProtect["Profit Protection Engine\n(+₹3,000 Trigger -> +₹500 Floor)"]
+        KillSwitch["Kill Switch Coordinator\n(Explicit State Machine)"]
+        
+        StratEngine -.-> PreTradeGate
+        MtmTrackerCore --> LossBreaker
+        MtmTrackerCore --> ProfitProtect
+        LossBreaker --> KillSwitch
+        KillSwitch --> PreTradeGate
     end
 
-    subgraph PersistenceLayer["Persistence & Audit Layer"]
-        PG[("PostgreSQL\n(Production State Store)")]
-        SQLite[("SQLite\n(Unit & Local Testing)")]
-        Repo["Trade Journal & State Repository"]
-        OMS --> Repo
-        PP --> Repo
-        Repo --> PG
-        Repo --> SQLite
+    subgraph MarketDataSubsystems["4 & 5. Market Data & Contract Resolution"]
+        DataProvider["Market Data Provider Abstraction"]
+        FyersFeed["FYERS Data Socket / REST"]
+        OfflineFeed["Historical Parquet / CSV Replay"]
+        MasterRegistry["Instrument Master Registry\n(NSE_FO.csv Parser)"]
+        ContractResolverCore["Option Contract Resolver\n(ATM Strike & Weekly Expiry)"]
+        
+        DataProvider --> FyersFeed
+        DataProvider --> OfflineFeed
+        MasterRegistry --> ContractResolverCore
+        ContractResolverCore --> StratEngine
     end
 
-    subgraph MonitoringLayer["Monitoring & Observability"]
-        LOG["Structured JSON Logger\n(PII & Secret Redacted)"]
-        ALERT["Alert Dispatcher\n(Telegram / Slack / Webhooks)"]
-        HEALTH["Process Health Heartbeat"]
-        KS --> ALERT
-        OMS --> LOG
-        HEALTH --> ALERT
+    subgraph ExecutionSubsystems["6, 7, 8, 9. Execution, Backtesting & Paper"]
+        OMS["Order Management System (OMS)\n(Idempotency & State Tracking)"]
+        BacktestEngine["Event-Driven Backtest Engine"]
+        PaperEngine["Paper Trading Engine"]
+        LiveBrokerAdapter["FYERS Broker Adapter (v3)\n(Hard-Gated Behind Safety Switch)"]
+        
+        PreTradeGate --> OMS
+        OMS --> BacktestEngine
+        OMS --> PaperEngine
+        OMS --> LiveBrokerAdapter
+    end
+
+    subgraph PersistenceSubsystems["10. Persistence & State Storage Layer"]
+        DB[("PostgreSQL (Production)\nSQLite (Testing)")]
+        StateRepo["Trade Journal & State Repository\n(ACID Event Logging)"]
+        OMS --> StateRepo
+        MtmTrackerCore --> StateRepo
+        StateRepo --> DB
     end
 ```
 
 ---
 
-## 4. The 12 Architectural Modules
+## 4. The 12 Target Architectural Subsystems
 
-### Module 1: Strategy Engine (`src/strategy/`)
+### Subsystem 1: Strategy Definitions & Configuration
+- **Package:** `src/core/strategy_template.py`, `config/strategy_config.py`
 - **Responsibilities:**
-  - Maintains state of the opening range (09:16:00 to 09:45:00 IST).
-  - Evaluates NIFTY Spot price ticks/bars against established Opening Range High (ORH) and Opening Range Low (ORL).
-  - Emits directional signals (`ENTER_LONG_CE`, `ENTER_LONG_PE`, `CLOSE_CE`, `CLOSE_PE`, `SQUARE_OFF`).
-  - Maintains current strategy position status (`FLAT`, `LONG_CE`, `LONG_PE`).
-- **Interfaces:**
-  - `BaseStrategy`: Abstract interface defining `on_bar(bar)`, `on_tick(tick)`, `on_order_update(update)`.
-  - Pure deterministic state machine free of network or broker dependencies.
+  - Manages `StrategyTemplate` registry defining supported assets, parameters, and schemas.
+  - Implements `VersionedStrategyConfig` ensuring all parameters are typed, validated, and immutable during runtime.
+  - Generates parameter diffs and validates against unconfirmed or unsupported parameters.
 
-### Module 2: Historical Market-Data Provider (`src/data/`)
+### Subsystem 2: Strategy Evaluation
+- **Package:** `src/strategy/`
 - **Responsibilities:**
-  - Abstracts historical candle fetching and live stream consumption.
-  - Provides uniform candle objects (`timestamp`, `open`, `high`, `low`, `close`, `volume`).
-  - Implements FYERS REST `/api/v3/history` pagination and resolution parsing.
-  - Implements CSV/Parquet reader for reproducible historical backtesting.
-- **Interfaces:**
-  - `MarketDataProvider`: Abstract base class with `get_history(symbol, resolution, start, end)` and `subscribe(symbols)`.
+  - Evaluates discrete market events (candles or ticks) against configured strategy rules.
+  - `OpeningRangeTracker`: Manages 09:16 to 09:45 IST boundary calculations and freezing.
+  - `NiftyOrbStrategy`: Implements StockMock-faithful entry signals, two-phase reversal sequencing, and mandatory square-off.
 
-### Module 3: Option-Contract & Expiry Resolver (`src/data/symbol_resolver.py`)
+### Subsystem 3: Risk Management
+- **Package:** `src/risk/`
 - **Responsibilities:**
-  - Identifies the active weekly expiry date for NIFTY options (Thursday or preceding business day for holidays).
-  - Resolves ATM strike: $\text{Strike}_{\text{ATM}} = \text{round}(\text{NIFTY\_SPOT} / 50) \times 50$.
-  - Constructs verified FYERS v3 derivative symbols (e.g., `NSE:NIFTY26N0624500CE`).
-  - Parses FYERS Symbol Master CSV cache to ensure valid strike tokens and lot sizes.
+  - `MtmTracker`: Standalone mark-to-market accounting with explicit staleness and data-quality checks.
+  - `DailyLossCircuitBreaker`: Enforces -₹3,000 threshold and manages session lockout.
+  - `ProfitProtectionEngine`: Manages +₹3,000 profit trigger and dynamic trailing floors.
+  - `PreTradeGatekeeper`: 12-point deterministic validation before orders reach execution adapters.
+  - `KillSwitchCoordinator`: Explicit state machine managing emergency cancellations and liquidations.
 
-### Module 4: Backtesting Engine (`src/backtest/`)
+### Subsystem 4: Market Data
+- **Package:** `src/data/base.py`, `src/data/offline_provider.py`, `src/data/fyers_adapter.py`
 - **Responsibilities:**
-  - Discrete event simulator recreating exact historical market conditions.
-  - Models realistic bid-ask spread, slippage, and brokerage/STT taxes.
-  - Generates comparative analytics matching StockMock output: Total PnL, Max Drawdown, Win Rate, Expectancy, Day-wise breakdown.
+  - Abstract `MarketDataProvider` interface serving underlying and option candles.
+  - Offline historical provider with strict validation (gap detection, chronological replay, no fabrication).
+  - High-speed in-memory LRU/TTL market data cache.
 
-### Module 5: Risk-Management Engine (`src/risk/`)
+### Subsystem 5: Contract Resolution
+- **Package:** `src/data/contract_resolver.py`, `src/data/instrument_master.py`
 - **Responsibilities:**
-  - **Daily Strategy Loss Kill Switch:** If cumulative strategy MTM $\le -₹3,000$, trigger emergency flatten and block all further activity for the day.
-  - **Profit-Protection Engine:** At cumulative MTM $\ge +₹3,000$, activate profit floor locking at $+₹500$. Support dynamic step-based trailing if configured.
-  - **Pre-Trade Risk Verification:** Blocks order creation if max order size exceeded, outside market hours, or if kill switch is armed.
+  - Ingests and normalizes official FYERS `NSE_FO.csv` derivative master files.
+  - Calculates ATM strikes via arithmetic `ROUND_HALF_UP` on 50-point intervals.
+  - Resolves holiday-adjusted weekly expiries and extracts dynamic lot sizes.
 
-### Module 6: Broker Adapter for FYERS (`src/broker/`)
+### Subsystem 6: Order Execution & Management (OMS)
+- **Package:** `src/oms/`
 - **Responsibilities:**
-  - Encapsulates FYERS API v3 REST endpoints and WebSockets (`data_socket` and `order_ws`).
-  - Implements OAuth 2.0 flow with daily token refresh and secure local credential caching.
-  - Handles rate limits (HTTP 429), exponential backoff, and network connection drops.
-- **FYERS v3 Specifics:**
-  - Order submission: `POST /api/v3/orders/sync`
-  - Position query: `GET /api/v3/positions`
-  - Orderbook query: `GET /api/v3/orders`
-  - Position exit: `DELETE /api/v3/positions`
+  - Manages order lifecycle through validated state transitions (`NEW` $\to$ `TRANSIT` $\to$ `PENDING` $\to$ `FILLED`).
+  - Enforces client order tag idempotency and atomic fill tracking.
 
-### Module 7: Order-Management & Reconciliation Engine (`src/oms/`)
+### Subsystem 7: Backtesting Lab
+- **Package:** `src/backtest/`
 - **Responsibilities:**
-  - Tracks order lifecycle: `NEW` $\to$ `TRANSIT` (4) $\to$ `PENDING` (6) $\to$ `FILLED` (2) / `CANCELLED` (1) / `REJECTED` (5) / `EXPIRED` (7).
-  - Enforces client-side order deduplication via deterministic `order_tag` tokens (`ORB_{session}_{seq}`).
-  - Background Reconciliation Worker: Polls FYERS broker positions/orders every 5 seconds to detect external manual overrides, broker-side rejections, or dropped websocket messages.
+  - Discrete-event historical simulation replaying 1-minute data streams.
+  - Accounts for realistic execution slippage and brokerage charges.
+  - Evaluates performance metrics (Sharpe, Drawdown, Profit Factor, Win Rate).
 
-### Module 8: Persistent State & Trade Journal (`src/storage/`)
+### Subsystem 8: Paper Trading
+- **Package:** `src/scheduler/` (Paper Mode)
 - **Responsibilities:**
-  - Guarantees ACID persistence of strategy state, orders, fills, and daily audit logs.
-  - Production database: PostgreSQL using async SQLAlchemy + `asyncpg`.
-  - Testing database: SQLite in-memory or file using `aiosqlite`.
-  - Enables crash recovery: On startup, the executor reconstructs open positions and range levels from the database without re-executing completed orders.
+  - Executes strategies against real-time market data without financial risk.
+  - Simulates realistic order fills using top-of-book market prices.
 
-### Module 9: Scheduling & Market-Session Management (`src/scheduler/`)
+### Subsystem 9: Live Broker Execution
+- **Package:** `src/broker/`
 - **Responsibilities:**
-  - Timezone-aware (Asia/Kolkata) state machine controlling trading session phases:
-    - `09:00 - 09:15`: Pre-market verification & broker token validation.
-    - `09:15 - 09:16`: Waiting for opening tick.
-    - `09:16 - 09:45`: Opening Range Formation (High / Low calculation).
-    - `09:45 - 15:10`: Active breakout trading and reversal window.
-    - `15:10`: Mandatory intraday square-off trigger.
-    - `15:15 - 15:30`: Session summary, journal finalize, process shutdown.
-  - Enforces day filter: Monday, Thursday, Friday execution only.
+  - Connects to FYERS API v3 REST and WebSocket endpoints.
+  - Manages OAuth 2.0 token caching and reconciliation polling.
+  - Hard-locked by safety interlocks during development phases.
 
-### Module 10: Logging, Monitoring & Alerts (`src/monitoring/`)
+### Subsystem 10: Persistence & Reporting
+- **Package:** `src/storage/`
 - **Responsibilities:**
-  - Structured JSON logs with timestamps, correlation IDs, module names, and sanitized payloads (no tokens or client secrets).
-  - Outbound alerts via Telegram / Slack / Webhooks on:
-    - Strategy entry / exit / reversal.
-    - Risk limit breaches (MTM $-₹3,000$ hit, profit locked).
-    - Broker connectivity errors or reconciliation discrepancies.
+  - PostgreSQL / SQLite storage via SQLAlchemy 2.0.
+  - Stores versioned configs, trading sessions, orders, fills, positions, risk snapshots, and audit events.
 
-### Module 11: Configuration & Secrets Management (`config/`)
+### Subsystem 11: Backend APIs
+- **Package:** `src/api/` (Documented in `API_CONTRACTS.md`)
 - **Responsibilities:**
-  - Pydantic Settings (`pydantic-settings`) loading from `.env` and environment variables.
-  - Strict type coercion and validation at application boot.
-  - Prevention of secret persistence in git or plaintext log output.
+  - REST endpoints for workstation configuration, backtest execution, and history queries.
+  - WebSocket telemetry broadcasting ticks, signals, order updates, and risk alerts.
 
-### Module 12: Test Suite (`tests/`)
+### Subsystem 12: Frontend Presentation
+- **Package:** `frontend/` (Documented in `FRONTEND_IMPLEMENTATION_PLAN.md`)
 - **Responsibilities:**
-  - Unit tests with $100\%$ logic coverage for strategy signals, reversal sequencing, risk triggers, and option resolution.
-  - Integration tests verifying database transactions, OMS state transitions, and broker adapter mock responses.
-  - Deterministic replay tests verifying identical execution given the same market tick sequence.
-
----
-
-## 5. Execution Modes
-
-| Attribute | Simulation Mode (`simulation`) | Paper Mode (`paper`) | Live Mode (`live`) |
-| :--- | :--- | :--- | :--- |
-| **Default** | **YES (Default)** | NO | NO |
-| **Market Data** | Historical CSV / Parquet | Live FYERS WebSocket | Live FYERS WebSocket |
-| **Broker Adapter** | `SimulatedBrokerAdapter` | `SimulatedBrokerAdapter` | `FyersBrokerAdapter` |
-| **Order Placement** | Memory / Simulated | Memory / Simulated | FYERS REST API v3 |
-| **Capital at Risk** | Zero | Zero | **Real Capital** |
-| **Safety Interlock** | None required | None required | Requires `LIVE_TRADING_ACK=true` |
-
----
-
-## 6. End-to-End Execution Sequence
-
-```mermaid
-sequenceDiagram
-    autonumber
-    participant Sched as Session Manager
-    participant SE as Strategy Engine
-    participant MD as Market Data Feed
-    participant RM as Risk Engine
-    participant OMS as Order Manager
-    participant BA as FYERS Broker Adapter
-    participant DB as Postgres Store
-
-    Note over Sched,BA: 09:16 - 09:45 IST: Opening Range Calculation
-    MD->>SE: NIFTY 1-min Candle / Ticks
-    SE->>SE: Update OR_High & OR_Low
-    
-    Note over Sched,BA: 09:45 IST: Active Breakout Window Begins
-    MD->>SE: NIFTY Spot Tick (Breaks OR_High)
-    SE->>SE: Trigger Breakout: ENTER_LONG_CE
-    SE->>RM: Validate Pre-Trade (Loss limit ok? Day ok?)
-    RM-->>SE: Order Approved
-    
-    SE->>OMS: Submit Buy ATM CE Order (Idempotency Tag: ORB_20261102_01)
-    OMS->>DB: Record Order (Status: NEW)
-    OMS->>BA: POST /api/v3/orders/sync
-    BA-->>OMS: Order Placed (Broker Order ID: 2611020001)
-    
-    BA-->>OMS: WebSocket Order Fill Event (Status: 2 - Traded)
-    OMS->>DB: Update Position (Status: FILLED, Qty: 25)
-    
-    Note over Sched,BA: Downward Reversal Event
-    MD->>SE: NIFTY Spot Tick (Breaks OR_Low)
-    SE->>SE: Reversal Triggered: Close CE, Open PE
-    
-    rect rgb(240, 220, 220)
-        Note over SE,BA: Step 1: Mandatory Existing Leg Close
-        SE->>OMS: Close Position CE
-        OMS->>BA: POST /api/v3/orders/sync (Sell CE)
-        BA-->>OMS: Order Filled (CE Closed)
-        OMS->>DB: CE Position Marked CLOSED
-    end
-    
-    rect rgb(220, 240, 220)
-        Note over SE,BA: Step 2: Open Reverse Leg
-        SE->>OMS: Open Position PE (ATM)
-        OMS->>BA: POST /api/v3/orders/sync (Buy PE)
-        BA-->>OMS: Order Filled (PE Open)
-        OMS->>DB: PE Position Marked OPEN
-    end
-
-    Note over Sched,BA: Risk Monitoring Loop
-    RM->>RM: Evaluate Strategy MTM
-    alt MTM <= -₹3000
-        RM->>OMS: Trigger KILL SWITCH Flatten All
-        OMS->>BA: DELETE /api/v3/positions (Exit All)
-        RM->>Sched: Disable entries for remaining session
-    else MTM >= +₹3000
-        RM->>RM: Lock Profit Floor at +₹500 (Trail if configured)
-    end
-
-    Note over Sched,BA: 15:10 IST: Mandatory Square-off
-    Sched->>OMS: Square-off All Intraday Strategy Positions
-    OMS->>BA: DELETE /api/v3/positions
-    OMS->>DB: Session Finalized
-
+  - Next.js 14+ application providing Dashboard, Strategy Builder, Interactive Charts, Backtesting Lab, and Paper Terminal.
+  - TradingView Lightweight Charts integration for low-latency visual analytics.
