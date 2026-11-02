@@ -48,7 +48,15 @@ credentials.json
 *.sqlite
 *.sqlite3
 *.db
+*.db-journal
 local.db
+
+# Frontend Dependencies and Next.js Build
+node_modules/
+.next/
+frontend/node_modules/
+frontend/.next/
+frontend/out/
 
 # Logs and Run artifacts
 logs/

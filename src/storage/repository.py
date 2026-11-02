@@ -481,3 +481,49 @@ class StateRepository:
         res = await self._session.execute(stmt)
         return list(res.scalars().all())
 
+    # --------------------------------------------------------------------------
+    # 7. Workstation API Query Helpers
+    # --------------------------------------------------------------------------
+
+    async def list_strategy_configs(self) -> List[StrategyConfigRecord]:
+        """List all saved strategy configurations ordered by creation timestamp."""
+        stmt = select(StrategyConfigRecord).order_by(StrategyConfigRecord.version.desc())
+        res = await self._session.execute(stmt)
+        return list(res.scalars().all())
+
+    async def list_orders(self, session_id: Optional[str] = None, limit: int = 100) -> List[OrderRecord]:
+        """List session or global orders with fills and transitions."""
+        stmt = (
+            select(OrderRecord)
+            .options(selectinload(OrderRecord.fills), selectinload(OrderRecord.transitions))
+            .order_by(OrderRecord.submitted_at.desc())
+            .limit(limit)
+        )
+        if session_id:
+            stmt = stmt.where(OrderRecord.session_id == session_id)
+        res = await self._session.execute(stmt)
+        return list(res.scalars().all())
+
+    async def list_positions(self, session_id: Optional[str] = None) -> List[PositionRecord]:
+        """List current session or all positions."""
+        stmt = select(PositionRecord).order_by(PositionRecord.opened_at.desc())
+        if session_id:
+            stmt = stmt.where(PositionRecord.session_id == session_id)
+        res = await self._session.execute(stmt)
+        return list(res.scalars().all())
+
+    async def list_instruments(self, is_active: bool = True) -> List[InstrumentRecord]:
+        """List available instruments and resolved option contracts."""
+        stmt = select(InstrumentRecord).where(InstrumentRecord.is_active == is_active).order_by(InstrumentRecord.strike.asc())
+        res = await self._session.execute(stmt)
+        return list(res.scalars().all())
+
+    async def list_audit_events(self, session_id: Optional[str] = None, limit: int = 100) -> List[AuditEventRecord]:
+        """List immutable audit log records."""
+        stmt = select(AuditEventRecord).order_by(AuditEventRecord.timestamp.desc()).limit(limit)
+        if session_id:
+            stmt = stmt.where(AuditEventRecord.session_id == session_id)
+        res = await self._session.execute(stmt)
+        return list(res.scalars().all())
+
+
