@@ -1,4 +1,5 @@
 fyers-apiv3>=3.0.7
+aws-lambda-powertools==1.25.5
 fastapi>=0.110.0
 uvicorn[standard]>=0.29.0
 websockets>=12.0

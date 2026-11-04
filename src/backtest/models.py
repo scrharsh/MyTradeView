@@ -102,6 +102,10 @@ class BacktestRun(BaseModel):
 
     run_id: str = Field(default_factory=lambda: f"BT_{datetime.now().strftime('%Y%m%d')}_{uuid4().hex[:8]}")
     dataset_id: str
+    dataset_fingerprint: Optional[str] = None
+    dataset_provenance: Optional[str] = None
+    is_synthetic: bool = False
+    is_underlying_only: bool = False
     start_date: date
     end_date: date
     strategy_name: str
@@ -109,6 +113,7 @@ class BacktestRun(BaseModel):
     strategy_config_snapshot: Dict[str, Any]
     execution_config: ExecutionModelConfig
     engine_version: str = "1.0.0"
+    initial_capital: Decimal = Decimal("100000.00")
     metrics: BacktestMetrics
     diagnostics: BacktestDiagnostics
     trades: List[BacktestTrade]

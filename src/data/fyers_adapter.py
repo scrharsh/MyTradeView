@@ -2,7 +2,7 @@
 
 from datetime import date, datetime, timezone
 from decimal import Decimal
-from typing import Any, AsyncIterator, Dict, List, Optional
+from typing import Any, AsyncIterator, Callable, Dict, List, Optional, Tuple
 import pytz
 
 from src.common.exceptions import (
@@ -26,13 +26,19 @@ class FyersMarketDataAdapter(MarketDataProvider):
         self,
         client: Optional[Any] = None,
         cache: Optional[MarketDataCache] = None,
+        credentials_provider: Optional[Callable[[], Optional[Tuple[str, str]]]] = None,
+        socket_factory: Optional[Callable[..., Any]] = None,
     ) -> None:
         """
         Initialize adapter with optional fyersModel client and response cache.
         If client is None, operates in offline/mock mode for testing.
+        ``credentials_provider`` enables live tick streaming (returns (client_id, token)).
         """
         self._client = client
         self._cache = cache
+        self._credentials_provider = credentials_provider
+        self._socket_factory = socket_factory
+        self.last_stream_feed: Optional[Any] = None
 
     # --------------------------------------------------------------------------
     # 1. Historical Candles (/api/v3/history)
@@ -203,9 +209,33 @@ class FyersMarketDataAdapter(MarketDataProvider):
         return []
 
     async def stream_ticks(self, symbols: List[str]) -> AsyncIterator[MarketTick]:
-        """Stream ticks via FYERS WebSocket (FyersDataSocket)."""
-        if False:
-            yield MarketTick(symbol="placeholder", ltp=Decimal("1.0"), timestamp=datetime.now())
+        """Stream genuine exchange-timestamped ticks via the FYERS v3 data WebSocket.
+
+        Requires ``credentials_provider`` (returns ``(client_id, access_token)``).
+        Raises BrokerConnectionError when unauthenticated; never yields fabricated ticks.
+        Exactly one symbol is supported per stream.
+        """
+        if self._credentials_provider is None or self._credentials_provider() is None:
+            raise BrokerConnectionError(
+                "FYERS credentials are not available. Authenticate first; no ticks are fabricated."
+            )
+        if len(symbols) != 1:
+            raise DataValidationError("stream_ticks supports exactly one symbol per stream.")
+
+        from src.data.fyers_live_feed import FyersLiveFeed
+
+        feed = FyersLiveFeed(
+            symbol=symbols[0],
+            credentials_provider=self._credentials_provider,
+            socket_factory=self._socket_factory,
+        )
+        self.last_stream_feed = feed
+        await feed.start()
+        try:
+            async for tick in feed.ticks():
+                yield tick
+        finally:
+            await feed.stop()
 
     def get_source_metadata(self) -> Dict[str, Any]:
         """Adapter metadata and capabilities summary."""

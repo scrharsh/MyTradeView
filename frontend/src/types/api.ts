@@ -4,9 +4,19 @@ export interface SystemHealthResponse {
   timestamp: string;
   broker_connected: boolean;
   broker_status: string;
+  fyers_authenticated?: boolean;
+  fyers_status?: string;
+  market_data_feed_connected?: boolean;
+  market_data_feed_status?: string;
   market_data_healthy: boolean;
   market_data_stale: boolean;
+  data_source?: string;
+  is_market_open?: boolean;
   websocket_state: string;
+  live_feed_subscribed?: boolean;
+  live_feed_fresh_tick?: boolean;
+  fyers_auth_reason?: string;
+  live_last_ltp?: string | null;
   database_connected: boolean;
   active_session_id?: string | null;
   last_reconciliation_time?: string | null;
@@ -99,6 +109,8 @@ export interface SessionActiveResponse {
   strategy_state: string;
   opening_range: OpeningRangeResponse;
   active_contract_symbol?: string | null;
+  data_source?: string;
+  is_synthetic?: boolean;
 }
 
 export interface RiskSnapshotResponse {
@@ -117,6 +129,10 @@ export interface RiskSnapshotResponse {
   is_profit_protection_active: boolean;
   profit_protection_status: string;
   profit_floor: number | string;
+  profit_protection_trigger?: number | string;
+  profit_protection_min_lock?: number | string;
+  profit_step?: number | string;
+  profit_lock_increment?: number | string;
   open_positions_count: number;
   is_data_stale: boolean;
   is_synthetic?: boolean;
@@ -219,13 +235,17 @@ export interface BacktestSummaryResponse {
   strategy_name: string;
   strategy_version: number;
   is_synthetic: boolean;
+  is_underlying_only?: boolean;
+  provenance?: string;
   net_profit: number | string;
   total_trades: number;
   win_rate_pct: number | string;
   profit_factor: number | string;
   max_drawdown_amount: number | string;
   max_drawdown_pct: number | string;
-  sharpe_ratio: number | string;
+  sharpe_ratio: number | string | null;
+  sharpe_ratio_reason?: string | null;
+  trade_pnl_mean_std_ratio?: number | string | null;
   expectancy: number | string;
   created_at: string;
 }
@@ -246,6 +266,19 @@ export interface BenchmarkResponse {
   summary: string;
 }
 
+export interface ReconciliationDiscrepancy {
+  discrepancy_type?: string;
+  category?: string;
+  identifier?: string;
+  symbol_or_id?: string;
+  symbol?: string;
+  internal_value?: any;
+  broker_value?: any;
+  severity: string;
+  details?: string;
+  description?: string;
+}
+
 export interface ReconciliationReport {
   is_synchronized: boolean;
   is_broker_available: boolean;
@@ -254,12 +287,7 @@ export interface ReconciliationReport {
   broker_orders_count: number;
   internal_positions_count: number;
   broker_positions_count: number;
-  discrepancies: Array<{
-    category: string;
-    symbol_or_id: string;
-    description: string;
-    severity: string;
-  }>;
+  discrepancies: ReconciliationDiscrepancy[];
   summary: string;
 }
 
@@ -274,6 +302,23 @@ export type ReconciliationResultResponse = ReconciliationReport;
 export type StrategyConfigItem = StrategyConfigVersionResponse;
 export type StrategyValidationResult = StrategyValidateResponse;
 export type StrategyTemplateItem = StrategyTemplateResponse;
+export interface MarketDataStatusResponse {
+  status: string;
+  backend_status: string;
+  fyers_authenticated: boolean;
+  fyers_status: string;
+  broker_status: string;
+  feed_connected: boolean;
+  feed_status: string;
+  data_source: string;
+  is_synthetic: boolean;
+  is_stale: boolean;
+  is_market_open: boolean;
+  current_time_ist: string;
+  market_operating_window: string;
+  has_credentials: boolean;
+}
+
 export interface AuditEventItem {
   event_id?: string;
   session_id?: string;

@@ -27,6 +27,12 @@ async def validate_strategy(req: StrategyValidateRequest) -> StrategyValidateRes
     return workstation_service.validate_strategy_parameters(req)
 
 
+@router.get("/active", response_model=StrategyConfigVersionResponse)
+async def get_active_strategy_config() -> StrategyConfigVersionResponse:
+    """Get the currently active strategy configuration applied to the runtime."""
+    return await workstation_service.get_active_strategy_config()
+
+
 @router.get("", response_model=List[StrategyConfigVersionResponse])
 async def list_strategy_configs() -> List[StrategyConfigVersionResponse]:
     """List all saved strategy configurations and versions."""
@@ -47,4 +53,13 @@ async def create_strategy_version(
 ) -> StrategyConfigVersionResponse:
     """Create a new version for an existing strategy configuration."""
     return await workstation_service.create_strategy_version(config_id, req)
+
+
+@router.post("/{config_id}/activate", response_model=StrategyConfigVersionResponse)
+async def activate_strategy_config(config_id: str) -> StrategyConfigVersionResponse:
+    """Activate a specific strategy configuration version and apply it immediately to the runtime."""
+    try:
+        return await workstation_service.activate_strategy_config(config_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
 

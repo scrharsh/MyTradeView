@@ -50,16 +50,54 @@ class StateRepository:
 
     async def save_strategy_config(self, config_snapshot: StrategyConfigSnapshot, is_active: bool = True) -> None:
         """Persist versioned strategy configuration snapshot."""
-        record = StrategyConfigRecord(
-            config_id=config_snapshot.config_id,
-            version=config_snapshot.version,
-            underlying_symbol=config_snapshot.underlying_symbol,
-            config_json=config_snapshot.model_dump(mode="json"),
-            is_active=is_active,
-            created_at=config_snapshot.created_at,
-        )
-        self._session.add(record)
-        await self._session.flush()
+        try:
+            if is_active:
+                await self._session.execute(
+                    update(StrategyConfigRecord)
+                    .where(StrategyConfigRecord.underlying_symbol == config_snapshot.underlying_symbol)
+                    .values(is_active=False)
+                )
+            stmt = select(StrategyConfigRecord).where(StrategyConfigRecord.config_id == config_snapshot.config_id)
+            result = await self._session.execute(stmt)
+            existing = result.scalar_one_or_none()
+            if existing is not None:
+                existing.version = config_snapshot.version
+                existing.underlying_symbol = config_snapshot.underlying_symbol
+                existing.config_json = config_snapshot.model_dump(mode="json")
+                existing.is_active = is_active
+                existing.created_at = config_snapshot.created_at
+            else:
+                record = StrategyConfigRecord(
+                    config_id=config_snapshot.config_id,
+                    version=config_snapshot.version,
+                    underlying_symbol=config_snapshot.underlying_symbol,
+                    config_json=config_snapshot.model_dump(mode="json"),
+                    is_active=is_active,
+                    created_at=config_snapshot.created_at,
+                )
+                self._session.add(record)
+            await self._session.commit()
+        except Exception:
+            await self._session.rollback()
+            raise
+
+    async def set_active_config(self, config_id: str, underlying_symbol: str) -> None:
+        """Mark a specific config version as active and deactivate all other versions for this underlying."""
+        try:
+            await self._session.execute(
+                update(StrategyConfigRecord)
+                .where(StrategyConfigRecord.underlying_symbol == underlying_symbol)
+                .values(is_active=False)
+            )
+            await self._session.execute(
+                update(StrategyConfigRecord)
+                .where(StrategyConfigRecord.config_id == config_id)
+                .values(is_active=True)
+            )
+            await self._session.commit()
+        except Exception:
+            await self._session.rollback()
+            raise
 
     async def get_latest_active_config(self, underlying_symbol: str) -> Optional[StrategyConfigRecord]:
         """Fetch latest active strategy configuration."""

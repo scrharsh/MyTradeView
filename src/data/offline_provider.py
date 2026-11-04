@@ -202,6 +202,46 @@ class OfflineHistoricalDataProvider(MarketDataProvider):
         """Register option contract derivative metadata."""
         self._option_contracts[contract.symbol] = contract
 
+    def populate_registry(self, registry: Any) -> None:
+        """Populate an InstrumentMasterRegistry with all option contracts loaded in this provider."""
+        for contract in self._option_contracts.values():
+            registry.register_option_contract(contract)
+
+    def load_dataset_directory(
+        self,
+        dir_path: Path,
+        provenance: str = "OFFLINE_DIRECTORY",
+        is_synthetic: bool = False,
+        registry: Optional[Any] = None,
+    ):
+        """
+        Validate and ingest an entire directory of market data using OfflineDatasetValidator.
+        Populates underlying index, option contracts, and quality reports.
+        Optionally registers contracts directly into an InstrumentMasterRegistry.
+        """
+        from src.data.validator import OfflineDatasetValidator
+        validator = OfflineDatasetValidator()
+        manifest, candles_by_symbol, contracts_by_symbol = validator.validate_directory(
+            dir_path=dir_path,
+            provenance=provenance,
+            is_synthetic=is_synthetic,
+        )
+        for sym, c_list in candles_by_symbol.items():
+            if "INDEX" in sym:
+                self._underlying_candles[sym] = c_list
+            else:
+                self._option_candles[sym] = c_list
+
+        for sym, contract in contracts_by_symbol.items():
+            self._option_contracts[sym] = contract
+            if registry is not None:
+                registry.register_option_contract(contract)
+
+        for sym, rep in manifest.quality_reports.items():
+            self._quality_reports[sym] = rep
+
+        return manifest
+
     # --------------------------------------------------------------------------
     # 2. MarketDataProvider Interface Implementation
     # --------------------------------------------------------------------------

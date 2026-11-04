@@ -22,6 +22,7 @@ def create_engine_and_factory(
     connect_args = {}
     if database_url.startswith("sqlite"):
         connect_args["check_same_thread"] = False
+        connect_args["timeout"] = 30
         engine = create_async_engine(
             database_url,
             connect_args=connect_args,

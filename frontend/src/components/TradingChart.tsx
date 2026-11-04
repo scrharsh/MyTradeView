@@ -22,15 +22,17 @@ interface TradingChartProps {
   orbLow?: number;
   breakoutTime?: string;
   optionEntryPrice?: number;
+  optionSymbol?: string;
 }
 
 export function TradingChart({
   spotCandles,
   optionCandles,
-  orbHigh = 25045.5,
-  orbLow = 24962.1,
+  orbHigh,
+  orbLow,
   breakoutTime,
-  optionEntryPrice = 143.0,
+  optionEntryPrice,
+  optionSymbol = "NSE:NIFTY26NOV25000CE",
 }: TradingChartProps) {
   const spotChartContainerRef = useRef<HTMLDivElement>(null);
   const optionChartContainerRef = useRef<HTMLDivElement>(null);
@@ -307,11 +309,13 @@ export function TradingChart({
       <div className="panel p-4 space-y-2">
         <div className="flex flex-wrap items-center justify-between border-b border-[#1c2638] pb-2 font-mono text-xs">
           <div className="flex items-center space-x-3">
-            <span className="font-bold text-slate-100 text-sm">NSE:NIFTY26NOV25000CE</span>
+            <span className="font-bold text-slate-100 text-sm">{optionSymbol}</span>
             <span className="text-[10px] bg-emerald-950 text-emerald-400 border border-emerald-800 px-1.5 py-0.5 rounded font-semibold">
-              OPTION 1m (CE ATM)
+              OPTION 1m (DERIVATIVE)
             </span>
-            <span className="text-slate-400">ENTRY: ₹{optionEntryPrice.toFixed(2)}</span>
+            {optionEntryPrice !== undefined && (
+              <span className="text-slate-400">ENTRY: ₹{optionEntryPrice.toFixed(2)}</span>
+            )}
           </div>
 
           {optionHud && (

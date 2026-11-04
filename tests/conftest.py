@@ -1,5 +1,14 @@
 """Pytest shared fixtures for unit and integration testing."""
 
+import os
+# Ensure test runs use an isolated SQLite database to prevent locking against running dev server
+os.environ["DATABASE_URL"] = "sqlite+aiosqlite:///test_tradeview_isolated.db"
+if os.path.exists("test_tradeview_isolated.db"):
+    try:
+        os.remove("test_tradeview_isolated.db")
+    except Exception:
+        pass
+
 import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker

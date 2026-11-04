@@ -136,8 +136,10 @@ def test_market_data_status(init_service):
     resp = client.get("/api/v1/market-data/status")
     assert resp.status_code == 200
     data = resp.json()
-    assert data["status"] == "HEALTHY"
-    assert data["feed_connected"] is True
+    assert data["status"] in {"HEALTHY", "CLOSED", "UNAUTHENTICATED"}
+    assert "feed_connected" in data
+    assert "data_source" in data
+    assert "fyers_authenticated" in data
 
 
 def test_session_endpoints(init_service):
@@ -148,7 +150,8 @@ def test_session_endpoints(init_service):
     data = resp.json()
     assert "session_id" in data
     assert data["execution_mode"] == "paper"
-    assert data["opening_range"]["is_established"] is True
+    assert "opening_range" in data
+    assert "is_established" in data["opening_range"]
 
     # Start
     resp_start = client.post("/api/v1/sessions/start")
@@ -175,16 +178,30 @@ def test_risk_snapshot(init_service):
 
 def test_orders_and_positions(init_service):
     client = init_service
-    # Orders
+    # Initial state on clean startup: 0 orders, 0 positions
     resp = client.get("/api/v1/orders")
     assert resp.status_code == 200
-    orders = resp.json()
+    assert len(resp.json()) == 0
+
+    resp_pos = client.get("/api/v1/positions")
+    assert resp_pos.status_code == 200
+    assert len(resp_pos.json()) == 0
+
+    # Seed demo fixtures explicitly
+    resp_seed = client.post("/api/v1/sessions/seed-demo")
+    assert resp_seed.status_code == 200
+    assert resp_seed.json()["status"] == "SEEDED"
+
+    # Verify seeded orders and positions
+    resp_orders = client.get("/api/v1/orders")
+    assert resp_orders.status_code == 200
+    orders = resp_orders.json()
     assert len(orders) >= 1
-    assert orders[0]["client_order_id"] == "ORD-20261106-001"
+    assert orders[0]["client_order_id"].startswith("ORD-")
+    assert orders[0]["tag"] == "DEMO_FIXTURE"
     assert len(orders[0]["transitions"]) >= 1
     assert len(orders[0]["fills"]) >= 1
 
-    # Positions
     resp_pos = client.get("/api/v1/positions")
     assert resp_pos.status_code == 200
     positions = resp_pos.json()
@@ -196,6 +213,15 @@ def test_orders_and_positions(init_service):
     assert resp_sq.status_code == 200
     sq_data = resp_sq.json()
     assert sq_data["is_open"] is False
+
+    # Clear orders and positions
+    resp_clear = client.post("/api/v1/sessions/clear-orders")
+    assert resp_clear.status_code == 200
+    assert resp_clear.json()["status"] == "CLEARED"
+
+    # Confirm clean slate
+    assert len(client.get("/api/v1/orders").json()) == 0
+    assert len(client.get("/api/v1/positions").json()) == 0
 
 
 def test_kill_switch(init_service):
@@ -214,6 +240,10 @@ def test_kill_switch(init_service):
     # Check that risk engine reflects kill-switch state
     risk_resp = client.get("/api/v1/risk/snapshot")
     assert risk_resp.json()["is_kill_switch_active"] is True
+
+    # Reset kill-switch so subsequent test suites remain isolated
+    from src.api.service import workstation_service
+    workstation_service.risk_engine.kill_switch.reset_for_new_session(workstation_service.active_session.session_id)
 
 
 def test_backtest_endpoints(init_service):

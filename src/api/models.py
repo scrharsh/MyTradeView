@@ -36,9 +36,19 @@ class SystemHealthResponse(BaseModel):
     timestamp: datetime = Field(default_factory=now_utc)
     broker_connected: bool = True
     broker_status: str = "CONNECTED"
+    fyers_authenticated: bool = False
+    fyers_status: str = "UNAUTHENTICATED"
+    market_data_feed_connected: bool = False
+    market_data_feed_status: str = "DISCONNECTED"
     market_data_healthy: bool = True
     market_data_stale: bool = False
-    websocket_state: str = "CONNECTED"
+    data_source: str = "SYNTHETIC"
+    is_market_open: bool = False
+    websocket_state: str = "NOT_STARTED"
+    live_feed_subscribed: bool = False
+    live_feed_fresh_tick: bool = False
+    fyers_auth_reason: str = ""
+    live_last_ltp: Optional[str] = None
     database_connected: bool = True
     active_session_id: Optional[str] = None
     last_reconciliation_time: Optional[datetime] = None
@@ -161,6 +171,8 @@ class SessionActiveResponse(BaseModel):
     strategy_state: str = "WAITING_FOR_ORB"
     opening_range: OpeningRangeResponse
     active_contract_symbol: Optional[str] = None
+    data_source: str = "SYNTHETIC"
+    is_synthetic: bool = True
 
 
 class SessionActionRequest(BaseModel):
@@ -187,6 +199,10 @@ class RiskSnapshotResponse(BaseModel):
     is_profit_protection_active: bool = False
     profit_protection_status: str = "INACTIVE"
     profit_floor: Decimal = Decimal("0.00")
+    profit_protection_trigger: Decimal = Decimal("3000.00")
+    profit_protection_min_lock: Decimal = Decimal("500.00")
+    profit_step: Decimal = Decimal("1000.00")
+    profit_lock_increment: Decimal = Decimal("500.00")
     open_positions_count: int = 0
     is_data_stale: bool = False
     is_synthetic: bool = False
@@ -262,7 +278,8 @@ class OrderResponseItem(BaseModel):
     updated_at: datetime
     transitions: List[OrderTransitionResponseItem] = Field(default_factory=list)
     fills: List[FillResponseItem] = Field(default_factory=list)
-    is_synthetic: bool = False
+    is_synthetic: bool = True
+    data_source: str = "SYNTHETIC"
 
 
 class PositionResponseItem(BaseModel):
@@ -282,7 +299,8 @@ class PositionResponseItem(BaseModel):
     is_open: bool
     opened_at: datetime
     closed_at: Optional[datetime] = None
-    is_synthetic: bool = False
+    is_synthetic: bool = True
+    data_source: str = "SYNTHETIC"
 
 
 class SquareOffRequest(BaseModel):
@@ -335,13 +353,17 @@ class BacktestSummaryResponse(BaseModel):
     strategy_name: str
     strategy_version: int
     is_synthetic: bool = False
+    is_underlying_only: bool = False
+    provenance: Optional[str] = None
     net_profit: Decimal
     total_trades: int
     win_rate_pct: Decimal
     profit_factor: Decimal
     max_drawdown_amount: Decimal
     max_drawdown_pct: Decimal
-    sharpe_ratio: Decimal
+    sharpe_ratio: Optional[Decimal] = None
+    sharpe_ratio_reason: Optional[str] = None
+    trade_pnl_mean_std_ratio: Optional[Decimal] = None
     expectancy: Decimal
     created_at: datetime
 

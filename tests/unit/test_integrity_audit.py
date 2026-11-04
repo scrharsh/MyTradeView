@@ -285,8 +285,10 @@ async def test_backtest_deterministic_sharpe_ratio():
     assert summary.total_trades >= 1
     # Win rate must be a percentage between 0 and 100
     assert Decimal("0.0") <= summary.win_rate_pct <= Decimal("100.0")
-    # Sharpe ratio is present as a Decimal
-    assert isinstance(summary.sharpe_ratio, Decimal)
+    # In a single-session backtest, portfolio Sharpe ratio is unavailable (None) with clear reason
+    assert summary.sharpe_ratio is None
+    assert "Insufficient daily return observations" in summary.sharpe_ratio_reason
+    assert summary.trade_pnl_mean_std_ratio is None or isinstance(summary.trade_pnl_mean_std_ratio, Decimal)
 
 
 @pytest.mark.asyncio

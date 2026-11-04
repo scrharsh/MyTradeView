@@ -8,10 +8,14 @@ Bridges the FastAPI endpoints to the underlying engines:
 - InstrumentMasterRegistry & ContractResolver (data)
 """
 
+import asyncio
 from datetime import date, datetime, time, timezone
 from decimal import Decimal, ROUND_HALF_UP
+import json
 import logging
+import os
 from pathlib import Path
+import pandas as pd
 import statistics
 import tempfile
 from typing import Any, Dict, List, Optional
@@ -51,10 +55,13 @@ from src.api.models import (
 from src.backtest.benchmark import BenchmarkStatus, StockMockBenchmarkComparator
 from src.backtest.engine import DiscreteEventBacktestEngine
 from src.backtest.execution import SimulatedExecutionModel
+from src.backtest.metrics import MetricsCalculator
 from src.backtest.models import BacktestDiagnostics, BacktestMetrics, BacktestRun, BacktestTrade, ExecutionModelConfig
 from src.backtest.synthetic import SyntheticMarketDataBuilder, generate_candle
+from src.data.validator import OfflineDatasetValidator
+from scripts.run_real_underlying_backtest import UnderlyingPointBacktester
 from src.broker.base import BrokerConnectionStatus
-from src.broker.models import BrokerPosition
+from src.broker.models import BrokerOrderBookItem, BrokerPosition
 from src.broker.paper import PaperBrokerClient
 from src.common.constants import (
     BreakoutConfirmationMode,
@@ -70,6 +77,7 @@ from src.common.constants import (
     RangeBoundaryMode,
     RiskTriggerReason,
     SessionPhase,
+    SignalType,
     StrategyState,
     StrategyTemplateType,
 )
@@ -89,7 +97,11 @@ from src.core.models import (
     StrategySignal,
     TradingSession,
 )
+from src.broker.fyers_auth import FyersAuthError, FyersAuthManager
+from src.data.candle_builder import TickCandleBuilder
 from src.data.contract_resolver import ContractResolver
+from src.data.fyers_live_feed import FyersLiveFeed
+from src.data.live_pipeline import LiveCandlePipeline
 from src.data.instrument_master import InstrumentMasterRegistry
 from src.oms.manager import OrderManagementSystem
 from src.oms.models import (
@@ -103,6 +115,7 @@ from src.risk.engine import RiskEngine
 from src.risk.kill_switch import KillSwitchCoordinator
 from src.storage.db import create_engine_and_factory, init_db
 from src.storage.repository import StateRepository
+from src.strategy.orb_nifty import NiftyOrbStrategy
 
 logger = logging.getLogger(__name__)
 
@@ -112,8 +125,13 @@ def _parse_enum(enum_cls: Any, val: Any) -> Any:
     if isinstance(val, enum_cls):
         return val
     if isinstance(val, str):
+        clean = val.strip().lower()
+        if enum_cls == BreakoutConfirmationMode and clean in {"wick_touch", "intrabar_tick", "tick_cross"}:
+            return BreakoutConfirmationMode.INTRABAR_TICK
+        if enum_cls == BreakoutConfirmationMode and clean in {"candle_close", "bar_close"}:
+            return BreakoutConfirmationMode.CANDLE_CLOSE
         try:
-            return enum_cls(val.lower())
+            return enum_cls(clean)
         except (ValueError, AttributeError):
             pass
         try:
@@ -142,12 +160,19 @@ class WorkstationService:
         self.contract_resolver = ContractResolver(self.instrument_registry)
         self.paper_broker = PaperBrokerClient()
 
-        # Active session defaults to PRE_MARKET / WAITING_FOR_MARKET
+        # Active session defaults to current calendar trading date in IST
+        today = to_ist(now_utc()).date()
+        now_time = to_ist(now_utc()).time()
+        initial_phase = (
+            SessionPhase.CLOSED
+            if (now_time > time(15, 30) or now_time < time(9, 15) or to_ist(now_utc()).weekday() >= 5)
+            else SessionPhase.ACTIVE_TRADING
+        )
         self.active_session = TradingSession(
-            session_id="SESSION-20261106-PAPER",
-            trading_date=date(2026, 11, 6),
+            session_id=f"SESSION-{today.strftime('%Y%m%d')}-PAPER",
+            trading_date=today,
             execution_mode=ExecutionMode.PAPER,
-            phase=SessionPhase.PRE_MARKET,
+            phase=initial_phase,
         )
         self.active_opening_range: Optional[OpeningRange] = None
 
@@ -167,6 +192,26 @@ class WorkstationService:
             broker_client=self.paper_broker,
         )
 
+        # Strategy and Live Paper Trading state
+        self.strategy: Optional[NiftyOrbStrategy] = None
+        self.last_candle_time: Optional[datetime] = None
+        self.last_tick_time: Optional[datetime] = None
+        self.candle_anomaly_stats: Dict[str, int] = {
+            "stale": 0,
+            "missing": 0,
+            "duplicate": 0,
+            "out_of_order": 0,
+        }
+        self._live_flag_manual: bool = False
+        self.historical_replay_active: bool = False
+
+        # FYERS authentication and live market-data pipeline (separate from synthetic/replay data)
+        self.fyers_auth = FyersAuthManager()
+        self.live_pipeline: Optional[LiveCandlePipeline] = None
+        self.live_candles: Dict[str, List[Candle]] = {}
+        self.live_socket_factory: Optional[Any] = None  # injection point for tests only
+        self.live_tick_stale_seconds: float = float(os.environ.get("LIVE_FEED_TICK_STALE_SECONDS", "30"))
+
         # In-memory caches
         self.active_strategy_config: Optional[StrategyConfig] = None
         self.sample_candles: Dict[str, List[Candle]] = {}
@@ -174,12 +219,138 @@ class WorkstationService:
         self.last_reconciliation_report: Optional[ReconciliationReport] = None
         self.is_initialized = False
 
+    # --------------------------------------------------------------------------
+    # FYERS authentication & live feed state
+    # --------------------------------------------------------------------------
+
+    @property
+    def live_data_connected(self) -> bool:
+        """True only when authenticated AND the WebSocket is open, subscribed and receiving fresh ticks.
+
+        When a live pipeline exists this is derived from actual feed state and cannot be
+        assigned. The manual flag is retained only for legacy callers when no pipeline exists.
+        """
+        pipeline = self.live_pipeline
+        if pipeline is not None:
+            return bool(pipeline.feed.is_live and self.fyers_auth.is_authenticated)
+        return self._live_flag_manual
+
+    @live_data_connected.setter
+    def live_data_connected(self, value: bool) -> None:
+        self._live_flag_manual = bool(value)
+
+    def _fyers_status_label(self) -> str:
+        st = self.fyers_auth.status()
+        if st["authenticated"]:
+            return "AUTHENTICATED"
+        if not st["oauth_configured"]:
+            return "NOT_CONFIGURED"
+        if not st["token_present"]:
+            return "UNAUTHENTICATED"
+        return f"AUTH_{st['reason']}" if st["reason"] not in ("NOT_VALIDATED",) else "TOKEN_NOT_VALIDATED"
+
+    def _feed_status_label(self, is_market_open: bool) -> str:
+        if self.live_pipeline is not None:
+            return self.live_pipeline.feed.connection_state
+        return "MARKET_CLOSED" if not is_market_open else "DISCONNECTED"
+
+    def get_live_feed_status(self) -> Dict[str, Any]:
+        """Distinct, sanitized stages: authentication, WebSocket, subscription, fresh ticks."""
+        auth = self.fyers_auth.status()
+        pipeline = self.live_pipeline
+        feed = pipeline.snapshot() if pipeline is not None else None
+        return {
+            "authentication": {
+                "authenticated": auth["authenticated"],
+                "token_present": auth["token_present"],
+                "oauth_configured": auth["oauth_configured"],
+                "validated_at": auth["validated_at"],
+                "reason": auth["reason"],
+            },
+            "pipeline_running": pipeline is not None and pipeline.running,
+            "websocket_connected": feed["feed"]["websocket_connected"] if feed else False,
+            "subscribed": feed["feed"]["subscribed"] if feed else False,
+            "fresh_tick_received": feed["feed"]["fresh_tick_received"] if feed else False,
+            "state": feed["feed"]["state"] if feed else "NOT_STARTED",
+            "live_data_connected": self.live_data_connected,
+            "feed": feed,
+            "execution_mode": "paper",
+        }
+
+    async def fyers_login_url(self) -> Dict[str, Any]:
+        return {"login_url": self.fyers_auth.get_login_url(), "redirect_uri": self.fyers_auth.redirect_uri}
+
+    async def fyers_exchange_code(self, auth_code_or_url: str) -> Dict[str, Any]:
+        return await self.fyers_auth.exchange_auth_code(auth_code_or_url)
+
+    async def fyers_validate(self) -> Dict[str, Any]:
+        result = await self.fyers_auth.validate()
+        if not result["authenticated"] and self.live_pipeline is not None:
+            await self.stop_live_feed()
+        return result
+
+    async def fyers_logout(self) -> Dict[str, Any]:
+        await self.stop_live_feed()
+        self.fyers_auth.clear_token()
+        self.fyers_auth._set_state(False, "LOGGED_OUT")
+        return self.fyers_auth.status()
+
+    def _live_credentials(self) -> Optional[tuple]:
+        token = self.fyers_auth.get_access_token()
+        if not token or not self.fyers_auth.client_id or not self.fyers_auth.is_authenticated:
+            return None
+        return (self.fyers_auth.client_id, token)
+
+    async def start_live_feed(self) -> Dict[str, Any]:
+        """Start the real FYERS WebSocket pipeline. Requires a *validated* FYERS session."""
+        if self.live_pipeline is not None:
+            return self.get_live_feed_status()
+        status = await self.fyers_auth.validate()
+        if not status["authenticated"]:
+            raise FyersAuthError(
+                f"FYERS is not authenticated ({status['reason']}); live feed not started. No data is substituted."
+            )
+        symbol = (self.active_strategy_config or StrategyConfig()).underlying_symbol
+
+        # Live data starts from a clean, separate state (never merged with synthetic/replay).
+        self.historical_replay_active = False
+        self.last_candle_time = None
+        self.live_candles = {}
+        self.strategy = None
+        if not self.active_session.is_active:
+            self.start_session()
+
+        feed = FyersLiveFeed(
+            symbol=symbol,
+            credentials_provider=self._live_credentials,
+            socket_factory=self.live_socket_factory,
+            stale_after_seconds=self.live_tick_stale_seconds,
+        )
+        builder = TickCandleBuilder(symbol=symbol)
+        pipeline = LiveCandlePipeline(feed, builder, on_candle=self._on_live_candle, on_event=self._on_live_event)
+        await pipeline.start()
+        self.live_pipeline = pipeline
+        return self.get_live_feed_status()
+
+    async def stop_live_feed(self) -> Dict[str, Any]:
+        pipeline, self.live_pipeline = self.live_pipeline, None
+        if pipeline is not None:
+            await pipeline.stop()
+        return self.get_live_feed_status()
+
+    async def _on_live_candle(self, candle: Candle) -> None:
+        await self.process_live_candle(candle, source="LIVE")
+
+    def _on_live_event(self, kind: str, reason: str) -> None:
+        if kind == "auth_failed":
+            self.fyers_auth.invalidate("FEED_AUTH_REJECTED")
+
     async def initialize(self) -> None:
         """Initialize database, repository, restore persisted state or seed default templates."""
         if self.is_initialized:
             return
 
-        db_url = "sqlite+aiosqlite:///./workstation_paper.db"
+        db_url = os.environ.get("DATABASE_URL", "sqlite+aiosqlite:///./workstation_paper.db")
         self._db_engine, self._session_factory = create_engine_and_factory(
             database_url=db_url,
             echo=False,
@@ -196,8 +367,12 @@ class WorkstationService:
         csv_data = """trading_symbol,underlying_symbol,strike_price,option_type,expiry_date,minimum_lot_size,tick_size
 NSE:NIFTY26NOV25000CE,NSE:NIFTY50-INDEX,25000.0,CE,2026-11-06,25,0.05
 NSE:NIFTY26NOV25000PE,NSE:NIFTY50-INDEX,25000.0,PE,2026-11-06,25,0.05
+NSE:NIFTY26NOV24950CE,NSE:NIFTY50-INDEX,24950.0,CE,2026-11-06,25,0.05
+NSE:NIFTY26NOV24950PE,NSE:NIFTY50-INDEX,24950.0,PE,2026-11-06,25,0.05
 NSE:NIFTY26NOV24900CE,NSE:NIFTY50-INDEX,24900.0,CE,2026-11-06,25,0.05
 NSE:NIFTY26NOV24900PE,NSE:NIFTY50-INDEX,24900.0,PE,2026-11-06,25,0.05
+NSE:NIFTY26NOV25050CE,NSE:NIFTY50-INDEX,25050.0,CE,2026-11-06,25,0.05
+NSE:NIFTY26NOV25050PE,NSE:NIFTY50-INDEX,25050.0,PE,2026-11-06,25,0.05
 NSE:NIFTY26NOV25100CE,NSE:NIFTY50-INDEX,25100.0,CE,2026-11-06,25,0.05
 NSE:NIFTY26NOV25100PE,NSE:NIFTY50-INDEX,25100.0,PE,2026-11-06,25,0.05
 """
@@ -227,44 +402,75 @@ NSE:NIFTY26NOV25100PE,NSE:NIFTY50-INDEX,25100.0,PE,2026-11-06,25,0.05
             )
         self.sample_candles["NSE:NIFTY26NOV25000PE"] = pe_candles
 
-        # 3. Strategy Configuration: Load existing from DB or seed default template
-        strategy_config = StrategyConfig(
-            underlying_symbol="NSE:NIFTY50-INDEX",
-            breakout_confirmation_mode=BreakoutConfirmationMode.CANDLE_CLOSE,
-            range_boundary_mode=RangeBoundaryMode.UP_TO_0944_CLOSE,
-            order_execution_style=OrderExecutionStyle.MARKET,
-            expiry_day_selection=ExpiryDaySelectionMode.CURRENT_WEEKLY_0DTE,
-        )
-        self.active_strategy_config = strategy_config
-
-        existing_configs = await self.repo.list_strategy_configs()
-        if not existing_configs:
-            snapshot = StrategyConfigSnapshot(
+        # 3. Strategy Configuration: Load existing active from DB or seed default template
+        latest_active = await self.repo.get_latest_active_config("NSE:NIFTY50-INDEX") if self.repo else None
+        if latest_active:
+            snapshot = self._record_to_snapshot(latest_active)
+            self.apply_strategy_config(snapshot)
+            logger.info("Restored persisted active strategy config %s (v%d)", snapshot.config_id, snapshot.version)
+        else:
+            default_snapshot = StrategyConfigSnapshot(
                 config_id="NIFTY_ORB_V1",
                 version=1,
-                underlying_symbol=strategy_config.underlying_symbol,
-                orb_start_time=time(9, 16),
-                orb_end_time=time(9, 45),
-                mandatory_exit_time=time(15, 10),
+                underlying_symbol="NSE:NIFTY50-INDEX",
+                strategy_name="NIFTY ORB Production Strategy",
+                orb_start_time=time(9, 16, 0),
+                orb_end_time=time(9, 45, 0),
+                mandatory_exit_time=time(15, 10, 0),
                 lots=1,
                 lot_size=25,
+                trading_days=["Monday", "Thursday", "Friday"],
+                breakout_confirmation_mode="candle_close",
+                range_boundary_mode="up_to_0944_close",
+                order_execution_style="market",
+                expiry_day_selection="current_weekly_0dte",
+                strike_selection_mode="ATM",
+                entry_start_time=time(9, 45, 0),
+                entry_end_time=time(15, 15, 0),
                 max_daily_loss_limit=Decimal("3000.00"),
                 profit_protection_trigger=Decimal("3000.00"),
                 profit_protection_min_lock=Decimal("500.00"),
+                profit_trailing_mode="lock_and_trail",
+                profit_step=Decimal("1000.00"),
+                profit_lock_increment=Decimal("500.00"),
+                parameters={
+                    "strategy_name": "NIFTY ORB Production Strategy",
+                    "underlying_symbol": "NSE:NIFTY50-INDEX",
+                    "orb_start_time": "09:16:00",
+                    "orb_end_time": "09:45:00",
+                    "mandatory_exit_time": "15:10:00",
+                    "lots": 1,
+                    "lot_size": 25,
+                    "trading_days": ["Monday", "Thursday", "Friday"],
+                    "breakout_confirmation_mode": "candle_close",
+                    "range_boundary_mode": "up_to_0944_close",
+                    "order_execution_style": "market",
+                    "expiry_day_selection": "current_weekly_0dte",
+                    "strike_selection_mode": "ATM",
+                    "max_daily_loss": 3000.0,
+                    "profit_protection_trigger": 3000.0,
+                    "profit_protection_min_lock": 500.0,
+                    "profit_trailing_mode": "lock_and_trail",
+                    "profit_step": 1000.0,
+                    "profit_lock_increment": 500.0,
+                },
                 created_at=now_utc(),
             )
-            await self.repo.save_strategy_config(snapshot, is_active=True)
+            if self.repo:
+                await self.repo.save_strategy_config(default_snapshot, is_active=True)
+            self.apply_strategy_config(default_snapshot)
 
-        # 4. Opening Range for 2026-11-06
+        # 4. Opening Range for session (Clean unestablished state by default)
+        today = self.active_session.trading_date or to_ist(now_utc()).date()
         self.active_opening_range = OpeningRange(
-            symbol="NSE:NIFTY50-INDEX",
-            session_date=date(2026, 11, 6),
-            start_time=time(9, 16),
-            end_time=time(9, 45),
-            high=Decimal("25045.50"),
-            low=Decimal("24962.10"),
-            is_established=True,
-            candle_count=29,
+            symbol=self.active_strategy_config.underlying_symbol,
+            session_date=today,
+            start_time=self.active_strategy_config.orb_start_time,
+            end_time=self.active_strategy_config.orb_end_time,
+            high=None,
+            low=None,
+            is_established=False,
+            candle_count=0,
         )
 
         # 5. Reload persisted Backtest Runs from database for restart recovery
@@ -276,8 +482,8 @@ NSE:NIFTY26NOV25100PE,NSE:NIFTY50-INDEX,25100.0,PE,2026-11-06,25,0.05
 
         # Generate baseline synthetic backtest run if none exists
         engine = DiscreteEventBacktestEngine(
-            strategy_config=strategy_config,
-            risk_config=RiskConfig(),
+            strategy_config=self.active_strategy_config,
+            risk_config=self.risk_config,
             execution_config=ExecutionModelConfig(slippage_points=Decimal("0.50")),
             contract_resolver=self.contract_resolver,
         )
@@ -289,19 +495,32 @@ NSE:NIFTY26NOV25100PE,NSE:NIFTY50-INDEX,25100.0,PE,2026-11-06,25,0.05
         self.sample_backtests[baseline_run.run_id] = baseline_run
         await self.repo.save_backtest_run(baseline_run)
 
-        # 6. Seed sample paper trading position (explicitly tagged as DEMO_FIXTURE)
-        await self._seed_demo_order_and_position()
+        # 6. Seed sample paper trading position only if explicitly enabled via environment variable
+        enable_demo = os.environ.get("ENABLE_DEMO_FIXTURES", "").strip().lower() in {"1", "true", "yes"}
+        if enable_demo:
+            await self._seed_demo_order_and_position()
 
         self.is_initialized = True
+
+        # If a daily token is already stored, verify it with a real FYERS request (non-blocking).
+        if self.fyers_auth.status()["token_present"]:
+            self._auth_validation_task = asyncio.create_task(self.fyers_auth.validate())
         logger.info("WorkstationService initialized in PAPER mode (DB-connected).")
 
     async def _seed_demo_order_and_position(self) -> None:
         """Seed a demonstration order and position explicitly tagged as DEMO_FIXTURE."""
-        client_oid = "ORD-20261106-001"
+        today = self.active_session.trading_date or to_ist(now_utc()).date()
+        date_str = today.strftime("%Y%m%d")
+        rand_id = uuid4().hex[:6].upper()
+        client_oid = f"ORD-{date_str}-{rand_id}"
+        broker_oid = f"PB-ORD-DEMO-{rand_id}"
+        demo_time = to_utc(IST_TZ.localize(datetime.combine(today, time(9, 46, 0))))
+        demo_time_fill = to_utc(IST_TZ.localize(datetime.combine(today, time(9, 46, 1))))
+
         oms_order = OmsOrder(
             client_order_id=client_oid,
             session_id=self.active_session.session_id,
-            intent_id="DEMO-INT-20261106-001",
+            intent_id=f"DEMO-INT-{date_str}-{rand_id}",
             strategy_name="NIFTY_ORB",
             strategy_version=1,
             symbol="NSE:NIFTY26NOV25000CE",
@@ -313,11 +532,11 @@ NSE:NIFTY26NOV25100PE,NSE:NIFTY50-INDEX,25100.0,PE,2026-11-06,25,0.05
             filled_qty=25,
             tag="DEMO_FIXTURE",
             oms_status=OmsOrderStatus.FILLED,
-            broker_order_id="PB-ORD-DEMO-9001",
+            broker_order_id=broker_oid,
             avg_fill_price=Decimal("120.00"),
             status_message="Demo fill at 120.00",
-            created_at=to_utc(IST_TZ.localize(datetime(2026, 11, 6, 9, 46, 0))),
-            updated_at=to_utc(IST_TZ.localize(datetime(2026, 11, 6, 9, 46, 1))),
+            created_at=demo_time,
+            updated_at=demo_time_fill,
         )
         oms_order.transitions.append(
             OmsOrderStateTransition(
@@ -327,7 +546,7 @@ NSE:NIFTY26NOV25100PE,NSE:NIFTY50-INDEX,25100.0,PE,2026-11-06,25,0.05
                 filled_qty=0,
                 avg_price=Decimal("0.00"),
                 message="Accepted in paper simulator",
-                timestamp=to_utc(IST_TZ.localize(datetime(2026, 11, 6, 9, 46, 0))),
+                timestamp=demo_time,
             )
         )
         oms_order.transitions.append(
@@ -338,24 +557,43 @@ NSE:NIFTY26NOV25100PE,NSE:NIFTY50-INDEX,25100.0,PE,2026-11-06,25,0.05
                 filled_qty=25,
                 avg_price=Decimal("120.00"),
                 message="Order filled at 120.00",
-                timestamp=to_utc(IST_TZ.localize(datetime(2026, 11, 6, 9, 46, 1))),
+                timestamp=demo_time_fill,
             )
         )
         fill = Fill(
-            fill_id="DEMO-FILL-001",
+            fill_id=f"DEMO-FILL-{rand_id}",
             client_order_id=client_oid,
-            broker_order_id="PB-ORD-DEMO-9001",
+            broker_order_id=broker_oid,
             symbol="NSE:NIFTY26NOV25000CE",
             side=OrderSide.BUY,
             fill_price=Decimal("120.00"),
             fill_qty=25,
-            timestamp=to_utc(IST_TZ.localize(datetime(2026, 11, 6, 9, 46, 1))),
+            timestamp=demo_time_fill,
         )
         oms_order.fills.append(fill)
         self.oms._orders[client_oid] = oms_order
+        self.oms._broker_to_client[broker_oid] = client_oid
+
+        # Seed broker order book with matching filled order
+        self.paper_broker._orders[broker_oid] = BrokerOrderBookItem(
+            broker_order_id=broker_oid,
+            client_order_id=client_oid,
+            symbol="NSE:NIFTY26NOV25000CE",
+            qty=25,
+            filled_qty=25,
+            remaining_qty=0,
+            status=OrderStatus.FILLED,
+            order_type=OrderType.MARKET,
+            side=OrderSide.BUY,
+            avg_price=Decimal("120.00"),
+            limit_price=Decimal("0.00"),
+            order_timestamp=demo_time,
+            message="Filled in paper simulation",
+            tag="DEMO_FIXTURE",
+        )
 
         pos = Position(
-            position_id="DEMO-POS-20261106-001",
+            position_id=f"DEMO-POS-{date_str}-{rand_id}",
             session_id=self.active_session.session_id,
             symbol="NSE:NIFTY26NOV25000CE",
             product_type=ProductType.INTRADAY,
@@ -368,7 +606,7 @@ NSE:NIFTY26NOV25100PE,NSE:NIFTY50-INDEX,25100.0,PE,2026-11-06,25,0.05
             unrealized_pnl=Decimal("862.50"),
             current_ltp=Decimal("154.50"),
             is_open=True,
-            opened_at=to_utc(IST_TZ.localize(datetime(2026, 11, 6, 9, 46, 1))),
+            opened_at=demo_time_fill,
         )
         self.oms._positions["NSE:NIFTY26NOV25000CE"] = pos
 
@@ -390,7 +628,7 @@ NSE:NIFTY26NOV25100PE,NSE:NIFTY50-INDEX,25100.0,PE,2026-11-06,25,0.05
         # Log audit event
         if self.repo:
             evt = AuditEvent(
-                event_id="EVT-INIT-001",
+                event_id=f"EVT-SEED-{rand_id}",
                 session_id=self.active_session.session_id,
                 timestamp=now_utc(),
                 event_type=AuditEventType.SESSION_BOOTSTRAP,
@@ -399,21 +637,74 @@ NSE:NIFTY26NOV25100PE,NSE:NIFTY50-INDEX,25100.0,PE,2026-11-06,25,0.05
             )
             await self.repo.record_audit_event(evt)
 
+    async def seed_demo_orders(self) -> Dict[str, Any]:
+        """Explicitly seed demo order and position fixtures for testing/demonstration."""
+        await self._seed_demo_order_and_position()
+        return {
+            "status": "SEEDED",
+            "message": "Demo fixtures seeded successfully (1 order, 1 position tagged DEMO_FIXTURE).",
+            "orders_count": len(self.oms.get_all_orders()),
+            "positions_count": len([p for p in self.oms.get_all_positions() if p.is_open]),
+        }
+
+    async def clear_orders_and_positions(self) -> Dict[str, Any]:
+        """Clear all active and historical orders, positions, and MTM tracker state."""
+        self.oms._orders.clear()
+        self.oms._broker_to_client.clear()
+        self.oms._positions.clear()
+        self.paper_broker._orders.clear()
+        self.paper_broker._positions.clear()
+        self.risk_engine.tracker.reset()
+        if self.repo:
+            report = await self.reconciliation_service.reconcile()
+            self.last_reconciliation_report = report
+        return {
+            "status": "CLEARED",
+            "message": "All orders, positions, and MTM tracking state cleared successfully.",
+            "orders_count": 0,
+            "positions_count": 0,
+        }
+
     # --------------------------------------------------------------------------
     # Health & System Telemetry
     # --------------------------------------------------------------------------
 
     async def get_system_health(self) -> SystemHealthResponse:
         """Return authentic system health, broker connectivity, and storage status."""
+        now_ist = datetime.now(IST_TZ)
+        is_weekday = now_ist.weekday() < 5
+        market_open = time(9, 15, 0)
+        market_close = time(15, 30, 0)
+        is_market_open = is_weekday and (market_open <= now_ist.time() <= market_close)
+
+        # Authenticated == a real FYERS API request succeeded (never mere token presence).
+        app_id = self.fyers_auth.client_id
+        fyers_authenticated = self.fyers_auth.is_authenticated
+        fyers_status = self._fyers_status_label()
+
+        feed_connected = self.live_data_connected and fyers_authenticated
+        feed_status = self._feed_status_label(is_market_open)
+        data_source = "LIVE" if feed_connected else ("HISTORICAL" if self.historical_replay_active else "SYNTHETIC")
+
         return SystemHealthResponse(
             status="HEALTHY",
             execution_mode="paper",
             timestamp=now_utc(),
             broker_connected=self.paper_broker.is_connected,
             broker_status="CONNECTED" if self.paper_broker.is_connected else "DISCONNECTED",
-            market_data_healthy=True,
-            market_data_stale=False,
-            websocket_state="CONNECTED",
+            fyers_authenticated=fyers_authenticated,
+            fyers_status=fyers_status,
+            market_data_feed_connected=feed_connected,
+            market_data_feed_status=feed_status,
+            market_data_healthy=feed_connected or self.live_pipeline is None,
+            market_data_stale=(self.live_pipeline is not None and not self.live_pipeline.feed.tick_fresh),
+            data_source=data_source,
+            is_market_open=is_market_open,
+            websocket_state=self.live_pipeline.feed.connection_state if self.live_pipeline else "NOT_STARTED",
+            live_feed_subscribed=bool(self.live_pipeline and self.live_pipeline.feed.subscribed),
+            live_feed_fresh_tick=bool(self.live_pipeline and self.live_pipeline.feed.tick_fresh),
+            fyers_auth_reason=self.fyers_auth.status()["reason"],
+            live_last_ltp=(str(self.live_pipeline.feed.last_ltp) if (self.live_pipeline and self.live_pipeline.feed.is_live and self.live_pipeline.feed.last_ltp is not None) else None),
             database_connected=self.repo is not None,
             active_session_id=self.active_session.session_id if self.active_session else None,
             last_reconciliation_time=self.last_reconciliation_report.timestamp if self.last_reconciliation_report else None,
@@ -565,14 +856,36 @@ NSE:NIFTY26NOV25100PE,NSE:NIFTY50-INDEX,25100.0,PE,2026-11-06,25,0.05
             elif "max_loss_limit" in merged_params:
                 risk_kwargs["max_daily_loss_limit"] = Decimal(str(merged_params["max_loss_limit"]))
 
-            if "breakout_confirmation_mode" in strat_kwargs:
+            if "opening_range_start" in merged_params and "orb_start_time" not in strat_kwargs:
+                val = merged_params["opening_range_start"]
+                if isinstance(val, str) and ":" in val:
+                    parts = val.split(":")
+                    strat_kwargs["orb_start_time"] = time(int(parts[0]), int(parts[1]))
+            if "opening_range_end" in merged_params and "orb_end_time" not in strat_kwargs:
+                val = merged_params["opening_range_end"]
+                if isinstance(val, str) and ":" in val:
+                    parts = val.split(":")
+                    strat_kwargs["orb_end_time"] = time(int(parts[0]), int(parts[1]))
+
+            if "breakout_confirmation" in merged_params and "breakout_confirmation_mode" not in strat_kwargs:
+                strat_kwargs["breakout_confirmation_mode"] = _parse_enum(
+                    BreakoutConfirmationMode, merged_params["breakout_confirmation"]
+                )
+            elif "breakout_confirmation_mode" in strat_kwargs:
                 strat_kwargs["breakout_confirmation_mode"] = _parse_enum(
                     BreakoutConfirmationMode, strat_kwargs["breakout_confirmation_mode"]
                 )
+
             if "range_boundary_mode" in strat_kwargs:
                 strat_kwargs["range_boundary_mode"] = _parse_enum(
                     RangeBoundaryMode, strat_kwargs["range_boundary_mode"]
                 )
+
+            if "trading_days" in merged_params:
+                td = merged_params["trading_days"]
+                if isinstance(td, list):
+                    strat_kwargs["trading_days"] = [str(d).strip().capitalize() for d in td]
+
             if "profit_trailing_mode" in risk_kwargs:
                 risk_kwargs["profit_trailing_mode"] = _parse_enum(
                     ProfitTrailingMode, risk_kwargs["profit_trailing_mode"]
@@ -619,6 +932,212 @@ NSE:NIFTY26NOV25100PE,NSE:NIFTY50-INDEX,25100.0,PE,2026-11-06,25,0.05
             )
         return results
 
+    def _record_to_snapshot(self, record: Any) -> StrategyConfigSnapshot:
+        """Convert a StrategyConfigRecord from the database into a StrategyConfigSnapshot."""
+        data = dict(record.config_json or {})
+        data["config_id"] = record.config_id
+        data["version"] = record.version
+        data["underlying_symbol"] = record.underlying_symbol
+        data["created_at"] = record.created_at
+        return StrategyConfigSnapshot.model_validate(data)
+
+    def _build_snapshot_from_dict(
+        self,
+        config_id: str,
+        version: int,
+        underlying_symbol: str,
+        params: Dict[str, Any],
+    ) -> StrategyConfigSnapshot:
+        """Build and validate a StrategyConfigSnapshot from a parameter dictionary."""
+        def parse_time(val: Any, default: time) -> time:
+            if val is None:
+                return default
+            if isinstance(val, time):
+                return val
+            if isinstance(val, str):
+                parts = val.strip().split(":")
+                return time(int(parts[0]), int(parts[1]), int(parts[2]) if len(parts) > 2 else 0)
+            return default
+
+        orb_start = parse_time(
+            params.get("orb_start_time") or params.get("opening_range_start"),
+            time(9, 16, 0),
+        )
+        orb_end = parse_time(
+            params.get("orb_end_time") or params.get("opening_range_end"),
+            time(9, 45, 0),
+        )
+        mandatory_exit = parse_time(
+            params.get("mandatory_exit_time") or params.get("square_off_time"),
+            time(15, 10, 0),
+        )
+        entry_start = parse_time(
+            params.get("entry_start_time"),
+            time(9, 45, 0),
+        )
+        entry_end = parse_time(
+            params.get("entry_end_time"),
+            time(15, 15, 0),
+        )
+
+        if orb_end <= orb_start:
+            raise ValueError(f"orb_end_time ({orb_end}) must be strictly after orb_start_time ({orb_start})")
+        if mandatory_exit <= orb_end:
+            raise ValueError(f"mandatory_exit_time ({mandatory_exit}) must be strictly after orb_end_time ({orb_end})")
+
+        lots = int(params.get("lots", 1))
+        if lots < 1:
+            raise ValueError("Lots must be >= 1")
+        lot_size = int(params.get("lot_size", 25))
+
+        raw_days = params.get("trading_days", ["Monday", "Thursday", "Friday"])
+        if isinstance(raw_days, str):
+            trading_days = [d.strip().capitalize() for d in raw_days.split(",") if d.strip()]
+        else:
+            trading_days = [str(d).strip().capitalize() for d in raw_days]
+
+        breakout_mode = str(
+            params.get("breakout_confirmation_mode") or params.get("breakout_confirmation", "candle_close")
+        ).lower()
+        range_boundary = str(params.get("range_boundary_mode", "up_to_0944_close")).lower()
+        order_style = str(params.get("order_execution_style", "market")).lower()
+        expiry_mode = str(params.get("expiry_day_selection", "current_weekly_0dte")).lower()
+        strike_mode = str(params.get("strike_selection_mode", "ATM")).upper()
+
+        max_loss = Decimal(str(params.get("max_daily_loss", params.get("max_loss_limit", 3000.0))))
+        profit_trigger = Decimal(
+            str(params.get("profit_protection_trigger", params.get("profit_protection_threshold", 3000.0)))
+        )
+        min_lock = Decimal(
+            str(params.get("profit_protection_min_lock", params.get("minimum_profit_lock", params.get("profit_floor_initial", 500.0))))
+        )
+        profit_trailing = str(params.get("profit_trailing_mode", "lock_and_trail")).lower()
+        profit_step = Decimal(
+            str(params.get("profit_step", params.get("profit_trailing_step_profit", 1000.0)))
+        )
+        profit_lock_inc = Decimal(
+            str(params.get("profit_lock_increment", params.get("profit_trailing_step_lock", 500.0)))
+        )
+
+        if min_lock >= profit_trigger:
+            raise ValueError(
+                f"profit_protection_min_lock ({min_lock}) must be strictly less than profit_trigger ({profit_trigger})"
+            )
+
+        merged_params = dict(params)
+        merged_params.update({
+            "strategy_name": str(params.get("strategy_name", "NIFTY ORB Production Strategy")),
+            "underlying_symbol": underlying_symbol,
+            "lots": lots,
+            "lot_size": lot_size,
+            "orb_start_time": orb_start.strftime("%H:%M:%S"),
+            "orb_end_time": orb_end.strftime("%H:%M:%S"),
+            "mandatory_exit_time": mandatory_exit.strftime("%H:%M:%S"),
+            "trading_days": trading_days,
+            "breakout_confirmation_mode": breakout_mode,
+            "range_boundary_mode": range_boundary,
+            "order_execution_style": order_style,
+            "expiry_day_selection": expiry_mode,
+            "strike_selection_mode": strike_mode,
+            "max_daily_loss": float(max_loss),
+            "profit_protection_trigger": float(profit_trigger),
+            "profit_protection_min_lock": float(min_lock),
+            "profit_trailing_mode": profit_trailing,
+            "profit_step": float(profit_step),
+            "profit_lock_increment": float(profit_lock_inc),
+        })
+
+        return StrategyConfigSnapshot(
+            config_id=config_id,
+            version=version,
+            underlying_symbol=underlying_symbol,
+            strategy_name=str(params.get("strategy_name", "NIFTY ORB Production Strategy")),
+            orb_start_time=orb_start,
+            orb_end_time=orb_end,
+            mandatory_exit_time=mandatory_exit,
+            lots=lots,
+            lot_size=lot_size,
+            trading_days=trading_days,
+            breakout_confirmation_mode=breakout_mode,
+            range_boundary_mode=range_boundary,
+            order_execution_style=order_style,
+            expiry_day_selection=expiry_mode,
+            strike_selection_mode=strike_mode,
+            entry_start_time=entry_start,
+            entry_end_time=entry_end,
+            max_daily_loss_limit=max_loss,
+            profit_protection_trigger=profit_trigger,
+            profit_protection_min_lock=min_lock,
+            profit_trailing_mode=profit_trailing,
+            profit_step=profit_step,
+            profit_lock_increment=profit_lock_inc,
+            parameters=merged_params,
+            created_at=now_utc(),
+        )
+
+    def _snapshot_to_strategy_config(self, snapshot: StrategyConfigSnapshot) -> StrategyConfig:
+        return StrategyConfig(
+            underlying_symbol=snapshot.underlying_symbol,
+            orb_start_time=snapshot.orb_start_time,
+            orb_end_time=snapshot.orb_end_time,
+            mandatory_exit_time=snapshot.mandatory_exit_time,
+            lots=snapshot.lots,
+            lot_size=snapshot.lot_size,
+            trading_days=snapshot.trading_days,
+            breakout_confirmation_mode=BreakoutConfirmationMode(snapshot.breakout_confirmation_mode)
+            if isinstance(snapshot.breakout_confirmation_mode, str)
+            else snapshot.breakout_confirmation_mode,
+            range_boundary_mode=RangeBoundaryMode(snapshot.range_boundary_mode)
+            if isinstance(snapshot.range_boundary_mode, str)
+            else snapshot.range_boundary_mode,
+            order_execution_style=OrderExecutionStyle(snapshot.order_execution_style)
+            if isinstance(snapshot.order_execution_style, str)
+            else snapshot.order_execution_style,
+            expiry_day_selection=ExpiryDaySelectionMode(snapshot.expiry_day_selection)
+            if isinstance(snapshot.expiry_day_selection, str)
+            else snapshot.expiry_day_selection,
+        )
+
+    def _snapshot_to_risk_config(self, snapshot: StrategyConfigSnapshot) -> RiskConfig:
+        trailing_mode = None
+        if snapshot.profit_trailing_mode:
+            try:
+                trailing_mode = ProfitTrailingMode(snapshot.profit_trailing_mode)
+            except ValueError:
+                trailing_mode = ProfitTrailingMode.LOCK_AND_TRAIL
+        return RiskConfig(
+            max_daily_loss_limit=snapshot.max_daily_loss_limit,
+            profit_protection_trigger=snapshot.profit_protection_trigger,
+            profit_protection_min_lock=snapshot.profit_protection_min_lock,
+            profit_trailing_mode=trailing_mode,
+            profit_trailing_step_profit=snapshot.profit_step,
+            profit_trailing_step_lock=snapshot.profit_lock_increment,
+        )
+
+    def apply_strategy_config(self, snapshot: StrategyConfigSnapshot) -> None:
+        """Apply active strategy and risk configurations dynamically to all runtime components."""
+        self.active_strategy_config = self._snapshot_to_strategy_config(snapshot)
+        self.risk_config = self._snapshot_to_risk_config(snapshot)
+        self.risk_engine.risk_config = self.risk_config
+        self.risk_engine.circuit_breaker.max_daily_loss = self.risk_config.max_daily_loss_limit
+        self.risk_engine.profit_protection.trigger_profit = self.risk_config.profit_protection_trigger
+        self.risk_engine.profit_protection.min_lock = self.risk_config.profit_protection_min_lock
+        self.risk_engine.profit_protection.step_profit = self.risk_config.profit_trailing_step_profit
+        self.risk_engine.profit_protection.step_lock = self.risk_config.profit_trailing_step_lock
+        self.risk_engine.profit_protection.mode = (
+            self.risk_config.profit_trailing_mode or ProfitTrailingMode.LOCK_MINIMUM_ONLY
+        )
+        self.risk_engine.gatekeeper.allowed_trading_days = set(self.active_strategy_config.trading_days)
+        self.risk_engine.gatekeeper.orb_start_time = self.active_strategy_config.orb_start_time
+        self.risk_engine.gatekeeper.mandatory_exit_time = self.active_strategy_config.mandatory_exit_time
+        self.strategy = NiftyOrbStrategy(
+            strategy_config=self.active_strategy_config,
+            risk_config=self.risk_config,
+            contract_resolver=self.contract_resolver,
+        )
+        if self.active_session:
+            self.strategy.on_session_start(self.active_session.session_id, self.active_session.trading_date)
+
     async def create_strategy_config(
         self, req: StrategyConfigCreateRequest
     ) -> StrategyConfigVersionResponse:
@@ -628,28 +1147,20 @@ NSE:NIFTY26NOV25100PE,NSE:NIFTY50-INDEX,25100.0,PE,2026-11-06,25,0.05
         underlying_configs = [m for m in existing if m.underlying_symbol == req.underlying_symbol]
         version = max([m.version for m in underlying_configs], default=0) + 1
 
-        lot_size = 25  # Dynamically resolved from NIFTY index specifications
-        snapshot = StrategyConfigSnapshot(
+        snapshot = self._build_snapshot_from_dict(
             config_id=config_id,
             version=version,
             underlying_symbol=req.underlying_symbol,
-            orb_start_time=time(9, 16),
-            orb_end_time=time(9, 45),
-            mandatory_exit_time=time(15, 10),
-            lots=int(req.parameters.get("lots", 1)),
-            lot_size=lot_size,
-            max_daily_loss_limit=Decimal(str(req.parameters.get("max_daily_loss", req.parameters.get("max_loss_limit", 3000.0)))),
-            profit_protection_trigger=Decimal(str(req.parameters.get("profit_protection_threshold", req.parameters.get("profit_protection_trigger", 3000.0)))),
-            profit_protection_min_lock=Decimal(str(req.parameters.get("profit_floor_initial", req.parameters.get("minimum_profit_lock", 500.0)))),
-            created_at=now_utc(),
+            params=req.parameters,
         )
         if self.repo:
             await self.repo.save_strategy_config(snapshot, is_active=True)
+        self.apply_strategy_config(snapshot)
         return StrategyConfigVersionResponse(
             config_id=config_id,
             version=version,
             underlying_symbol=req.underlying_symbol,
-            parameters=req.parameters,
+            parameters=snapshot.parameters,
             is_active=True,
             created_at=snapshot.created_at,
         )
@@ -663,30 +1174,72 @@ NSE:NIFTY26NOV25100PE,NSE:NIFTY50-INDEX,25100.0,PE,2026-11-06,25,0.05
         underlying_configs = [m for m in existing if m.underlying_symbol == underlying]
         new_version = max([m.version for m in underlying_configs], default=0) + 1
 
-        lot_size = 25
-        snapshot = StrategyConfigSnapshot(
+        snapshot = self._build_snapshot_from_dict(
             config_id=f"{config_id}_v{new_version}",
             version=new_version,
             underlying_symbol=underlying,
-            orb_start_time=time(9, 16),
-            orb_end_time=time(9, 45),
-            mandatory_exit_time=time(15, 10),
-            lots=int(req.parameters.get("lots", 1)),
-            lot_size=lot_size,
-            max_daily_loss_limit=Decimal(str(req.parameters.get("max_daily_loss", req.parameters.get("max_loss_limit", 3000.0)))),
-            profit_protection_trigger=Decimal(str(req.parameters.get("profit_protection_threshold", req.parameters.get("profit_protection_trigger", 3000.0)))),
-            profit_protection_min_lock=Decimal(str(req.parameters.get("profit_floor_initial", req.parameters.get("minimum_profit_lock", 500.0)))),
-            created_at=now_utc(),
+            params=req.parameters,
         )
         if self.repo:
             await self.repo.save_strategy_config(snapshot, is_active=req.set_active)
+        if req.set_active:
+            self.apply_strategy_config(snapshot)
         return StrategyConfigVersionResponse(
             config_id=config_id,
             version=new_version,
             underlying_symbol=underlying,
-            parameters=req.parameters,
+            parameters=snapshot.parameters,
             is_active=req.set_active,
             created_at=snapshot.created_at,
+        )
+
+    async def activate_strategy_config(self, config_id: str) -> StrategyConfigVersionResponse:
+        """Activate a specific configuration version and apply it immediately to the runtime."""
+        if not self.repo:
+            raise ValueError("Database repository unavailable")
+        configs = await self.repo.list_strategy_configs()
+        target = next((c for c in configs if c.config_id == config_id), None)
+        if not target:
+            raise ValueError(f"Strategy configuration '{config_id}' not found")
+
+        await self.repo.set_active_config(config_id, target.underlying_symbol)
+        active_rec = await self.repo.get_latest_active_config(target.underlying_symbol)
+        if not active_rec:
+            raise ValueError(f"Failed to retrieve activated record for '{config_id}'")
+        snapshot = self._record_to_snapshot(active_rec)
+        self.apply_strategy_config(snapshot)
+
+        return StrategyConfigVersionResponse(
+            config_id=snapshot.config_id,
+            version=snapshot.version,
+            underlying_symbol=snapshot.underlying_symbol,
+            parameters=snapshot.parameters,
+            is_active=True,
+            created_at=snapshot.created_at,
+        )
+
+    async def get_active_strategy_config(self) -> StrategyConfigVersionResponse:
+        """Return currently active strategy configuration from database or runtime."""
+        if self.repo:
+            active_rec = await self.repo.get_latest_active_config("NSE:NIFTY50-INDEX")
+            if active_rec:
+                snapshot = self._record_to_snapshot(active_rec)
+                return StrategyConfigVersionResponse(
+                    config_id=snapshot.config_id,
+                    version=snapshot.version,
+                    underlying_symbol=snapshot.underlying_symbol,
+                    parameters=snapshot.parameters,
+                    is_active=True,
+                    created_at=snapshot.created_at,
+                )
+        params = self.active_strategy_config.model_dump(mode="json") if self.active_strategy_config else {}
+        return StrategyConfigVersionResponse(
+            config_id="NIFTY_ORB_ACTIVE",
+            version=1,
+            underlying_symbol="NSE:NIFTY50-INDEX",
+            parameters=params,
+            is_active=True,
+            created_at=now_utc(),
         )
 
     # --------------------------------------------------------------------------
@@ -700,10 +1253,17 @@ NSE:NIFTY26NOV25100PE,NSE:NIFTY50-INDEX,25100.0,PE,2026-11-06,25,0.05
         Return 1m candles for charting.
         Never substitutes underlying index candles for missing option contracts.
         """
-        candles = self.sample_candles.get(symbol, [])
-        is_synthetic = len(candles) > 0
-        provenance = "SYNTHETIC_BUILDER (2026-11-06)" if is_synthetic else "UNAVAILABLE"
-        data_source = "SYNTHETIC_SIMULATION" if is_synthetic else "UNAVAILABLE"
+        if self.live_pipeline is not None:
+            # Live mode: serve ONLY candles built from genuine FYERS ticks (never synthetic).
+            candles = self.live_candles.get(symbol, [])
+            is_synthetic = False
+            provenance = "LIVE_FYERS_TICK_AGGREGATED" if candles else "UNAVAILABLE"
+            data_source = "LIVE" if candles else "UNAVAILABLE"
+        else:
+            candles = self.sample_candles.get(symbol, [])
+            is_synthetic = len(candles) > 0
+            provenance = "SYNTHETIC_BUILDER (2026-11-06)" if is_synthetic else "UNAVAILABLE"
+            data_source = "SYNTHETIC_SIMULATION" if is_synthetic else "UNAVAILABLE"
 
         filtered = candles
         if start_time:
@@ -783,23 +1343,55 @@ NSE:NIFTY26NOV25100PE,NSE:NIFTY50-INDEX,25100.0,PE,2026-11-06,25,0.05
             )
 
         orb_resp = OpeningRangeResponse()
-        if self.active_opening_range:
+        start_t = (
+            self.active_strategy_config.orb_start_time.strftime("%H:%M:%S")
+            if self.active_strategy_config
+            else "09:16:00"
+        )
+        end_t = (
+            self.active_strategy_config.orb_end_time.strftime("%H:%M:%S")
+            if self.active_strategy_config
+            else "09:45:00"
+        )
+        if self.strategy and self.strategy.range_tracker.is_established:
+            orb = self.strategy.range_tracker.to_domain_model()
+            orb_resp = OpeningRangeResponse(
+                is_established=orb.is_established,
+                high=orb.high,
+                low=orb.low,
+                range_width=(orb.high - orb.low) if orb.high and orb.low else None,
+                start_time=start_t,
+                end_time=end_t,
+                candle_count=orb.candle_count,
+            )
+        elif self.active_opening_range:
             orb = self.active_opening_range
             orb_resp = OpeningRangeResponse(
                 is_established=orb.is_established,
                 high=orb.high,
                 low=orb.low,
                 range_width=(orb.high - orb.low) if orb.high and orb.low else None,
-                start_time="09:16:00",
-                end_time="09:45:00",
+                start_time=start_t,
+                end_time=end_t,
                 candle_count=orb.candle_count,
             )
 
         active_contract = None
         for p in self.oms.get_all_positions():
-            if p.is_open:
+            if p.is_open and p.net_qty != 0:
                 active_contract = p.symbol
                 break
+
+        strat_state = "IDLE"
+        if self.strategy:
+            strat_state = self.strategy.state.value
+        elif active_contract:
+            strat_state = "POSITION_OPEN"
+        else:
+            strat_state = "WAITING_FOR_ORB"
+
+        data_source = "LIVE" if self.live_data_connected else ("HISTORICAL" if self.historical_replay_active else "SYNTHETIC")
+        is_synthetic = not self.live_data_connected and not self.historical_replay_active
 
         return SessionActiveResponse(
             session_id=self.active_session.session_id,
@@ -809,10 +1401,269 @@ NSE:NIFTY26NOV25100PE,NSE:NIFTY50-INDEX,25100.0,PE,2026-11-06,25,0.05
             is_active=self.active_session.is_active,
             started_at=self.active_session.started_at,
             ended_at=self.active_session.ended_at,
-            strategy_state="POSITION_OPEN" if active_contract else "WAITING_FOR_ORB",
+            strategy_state=strat_state,
             opening_range=orb_resp,
             active_contract_symbol=active_contract,
+            data_source=data_source,
+            is_synthetic=is_synthetic,
         )
+
+    def start_session(self, trading_date: Optional[date] = None) -> SessionActiveResponse:
+        """Start or restart the paper trading session."""
+        sess_date = trading_date or to_ist(now_utc()).date()
+        sess_id = f"SESSION-{sess_date.strftime('%Y%m%d')}-PAPER"
+        self.active_session = self.active_session.model_copy(
+            update={
+                "session_id": sess_id,
+                "trading_date": sess_date,
+                "phase": SessionPhase.ACTIVE_TRADING,
+                "is_active": True,
+                "started_at": now_utc(),
+                "ended_at": None,
+            }
+        )
+
+        if self.strategy:
+            self.strategy.on_session_start(self.active_session.session_id, sess_date)
+            if self.strategy.range_tracker.is_established:
+                self.active_opening_range = self.strategy.range_tracker.to_domain_model()
+
+        return self.get_active_session()
+
+    def stop_session(self) -> SessionActiveResponse:
+        """Gracefully stop active trading session."""
+        self.active_session = self.active_session.model_copy(
+            update={
+                "phase": SessionPhase.POST_MARKET,
+                "is_active": False,
+                "ended_at": now_utc(),
+            }
+        )
+        return self.get_active_session()
+
+    def get_market_data_status(self) -> Dict[str, Any]:
+        """Return dynamic market data feed and WebSocket connectivity health."""
+        now_ist = datetime.now(IST_TZ)
+        is_weekday = now_ist.weekday() < 5
+        market_open = time(9, 15, 0)
+        market_close = time(15, 30, 0)
+        is_market_open = is_weekday and (market_open <= now_ist.time() <= market_close)
+
+        # Authenticated == a real FYERS API request succeeded (never mere token presence).
+        app_id = self.fyers_auth.client_id
+        fyers_authenticated = self.fyers_auth.is_authenticated
+        fyers_status = self._fyers_status_label()
+
+        is_stale = False
+        if self.last_candle_time:
+            age = (now_utc() - to_utc(self.last_candle_time)).total_seconds()
+            if is_market_open and age > 300:
+                is_stale = True
+
+        feed_connected = self.live_data_connected and fyers_authenticated
+        feed_status = self._feed_status_label(is_market_open)
+        data_source = "LIVE" if feed_connected else ("HISTORICAL" if self.historical_replay_active else "SYNTHETIC")
+
+        status = "HEALTHY" if (feed_connected or not is_stale) else ("CLOSED" if not is_market_open else "UNAUTHENTICATED")
+
+        return {
+            "status": status,
+            "backend_status": "HEALTHY",
+            "fyers_authenticated": fyers_authenticated,
+            "fyers_status": fyers_status,
+            "broker_status": "CONNECTED" if self.paper_broker.is_connected else "DISCONNECTED",
+            "feed_connected": feed_connected,
+            "feed_status": feed_status,
+            "data_source": data_source,
+            "is_synthetic": data_source == "SYNTHETIC",
+            "is_stale": is_stale,
+            "is_market_open": is_market_open,
+            "current_time_ist": now_ist.strftime("%Y-%m-%d %H:%M:%S IST"),
+            "market_operating_window": "09:15:00 to 15:30:00 IST",
+            "has_credentials": bool(app_id),
+            "reconnect_count": self.live_pipeline.feed.reconnect_count if self.live_pipeline else 0,
+            "last_candle_time": to_ist(self.last_candle_time).strftime("%Y-%m-%d %H:%M:%S IST") if self.last_candle_time else None,
+            "last_tick_time": to_ist(self.last_tick_time).strftime("%Y-%m-%d %H:%M:%S IST") if self.last_tick_time else None,
+            "subscribed_symbols_count": 1 if (self.live_pipeline and self.live_pipeline.feed.subscribed) else 0,
+            "websocket_connected": bool(self.live_pipeline and self.live_pipeline.feed.ws_connected),
+            "subscribed": bool(self.live_pipeline and self.live_pipeline.feed.subscribed),
+            "fresh_tick_received": bool(self.live_pipeline and self.live_pipeline.feed.tick_fresh),
+            "fyers_auth_reason": self.fyers_auth.status()["reason"],
+            "live_feed": self.get_live_feed_status(),
+            "anomalies": dict(self.candle_anomaly_stats),
+            "execution_mode": "paper",
+        }
+
+    async def process_live_candle(self, candle: Candle, source: str = "REPLAY") -> List[OmsOrder]:
+        """
+        Process a real-time 1-minute candlestick from live market data or paper replay.
+
+        Strictly enforces:
+        - Bar-level deduplication and out-of-order detection.
+        - Staleness check (flagging if candle age is excessive).
+        - Passing candle to NiftyOrbStrategy.on_candle().
+        - Pre-trade risk gating via RiskEngine.
+        - Paper order submission via OMS & PaperBrokerClient.
+        - Lookahead-free execution with 0.50 pts slippage and statutory costs.
+        - Two-phase reversal sequencing and mandatory 15:10 square-off.
+        """
+        if self.strategy is None:
+            self.strategy = NiftyOrbStrategy(
+                strategy_config=self.active_strategy_config or StrategyConfig(),
+                risk_config=self.risk_config,
+                contract_resolver=self.contract_resolver,
+            )
+            self.strategy.on_session_start(self.active_session.session_id, self.active_session.trading_date)
+
+        # 1. Deduplication and sequence order check
+        if self.last_candle_time is not None:
+            if candle.timestamp == self.last_candle_time:
+                self.candle_anomaly_stats["duplicate"] += 1
+                logger.warning(
+                    f"[MarketData] Duplicate candle detected at {candle.timestamp}. Dropping fail-closed."
+                )
+                return []
+            elif candle.timestamp < self.last_candle_time:
+                self.candle_anomaly_stats["out_of_order"] += 1
+                logger.warning(
+                    f"[MarketData] Out-of-order candle: {candle.timestamp} < {self.last_candle_time}. Dropping fail-closed."
+                )
+                return []
+            elif (candle.timestamp - self.last_candle_time).total_seconds() > 60:
+                self.candle_anomaly_stats["missing"] += 1
+
+        # 2. Staleness check
+        now = now_utc()
+        candle_utc = to_utc(candle.timestamp)
+        age_seconds = (now - candle_utc).total_seconds()
+        now_ist = to_ist(now)
+        is_market_hours = now_ist.weekday() < 5 and (time(9, 15) <= now_ist.time() <= time(15, 30))
+        if is_market_hours and age_seconds > 300:
+            self.candle_anomaly_stats["stale"] += 1
+            logger.warning(f"[MarketData] Stale candle age {age_seconds:.1f}s at {candle.timestamp}.")
+
+        self.last_candle_time = candle.timestamp
+
+        # Cache candle for chart rendering (live candles never mix with synthetic/replay cache)
+        cache = self.live_candles if source == "LIVE" else self.sample_candles
+        if candle.symbol not in cache:
+            cache[candle.symbol] = []
+        cache[candle.symbol].append(candle)
+
+        # 3. Strategy evaluation
+        signals = self.strategy.on_candle(candle)
+
+        if self.strategy.range_tracker.is_established:
+            self.active_opening_range = self.strategy.range_tracker.to_domain_model()
+
+        generated_orders: List[OmsOrder] = []
+
+        # 4. Execute breakout / exit signals
+        for sig in signals:
+            orders = await self._execute_signal(sig, candle.timestamp)
+            generated_orders.extend(orders)
+
+        # 5. Intraday MTM & Risk Circuit Breakers
+        risk_snap = self.risk_engine.get_snapshot()
+        risk_signals = self.strategy.on_mtm_update(
+            realized_pnl=risk_snap.realized_pnl,
+            unrealized_pnl=risk_snap.unrealized_pnl,
+            timestamp=candle.timestamp,
+        )
+        for rs in risk_signals:
+            orders = await self._execute_signal(rs, candle.timestamp)
+            generated_orders.extend(orders)
+
+        return generated_orders
+
+    async def _execute_signal(self, sig: StrategySignal, timestamp: datetime) -> List[OmsOrder]:
+        """Convert a StrategySignal into an OrderIntent and submit to OMS."""
+        orders: List[OmsOrder] = []
+        if sig.signal_type in {SignalType.ENTER_LONG_CE, SignalType.ENTER_LONG_PE}:
+            contract = sig.target_contract
+            if not contract and self.contract_resolver:
+                opt_type = OptionType.CE if sig.signal_type == SignalType.ENTER_LONG_CE else OptionType.PE
+                try:
+                    contract = self.contract_resolver.resolve_atm_contract(
+                        underlying_price=sig.underlying_price,
+                        option_type=opt_type,
+                        target_date=to_ist(timestamp).date(),
+                    )
+                except Exception as e:
+                    logger.error(f"[WorkstationService] Contract resolution failed for {sig}: {e}")
+                    return []
+
+            if not contract:
+                logger.error(f"[WorkstationService] No contract resolved for signal {sig.signal_id}")
+                return []
+
+            qty = (contract.lot_size if contract else 25) * (self.active_strategy_config.lots if self.active_strategy_config else 1)
+            intent = OrderIntent(
+                intent_id=f"INT-{uuid4().hex[:8].upper()}",
+                client_order_id=f"ORD-{uuid4().hex[:8].upper()}",
+                session_id=self.active_session.session_id if self.active_session else "SESSION-DEFAULT",
+                strategy_name="NIFTY_ORB",
+                strategy_version=self.active_strategy_config.version if hasattr(self.active_strategy_config, "version") else 1,
+                symbol=contract.symbol,
+                side=OrderSide.BUY,
+                order_type=OrderType.MARKET,
+                product_type=ProductType.INTRADAY,
+                qty=qty,
+                tag="ORB_ENTRY",
+                created_at=to_utc(timestamp),
+            )
+            order = await self.oms.submit_order_intent(intent, contract=contract, evaluation_time=timestamp)
+            orders.append(order)
+
+            # In paper mode, order is filled immediately by PaperBrokerClient
+            if order.fills and self.strategy:
+                for f in order.fills:
+                    rep_sigs = self.strategy.on_order_fill(f)
+                    for rep in rep_sigs:
+                        rep_orders = await self._execute_signal(rep, timestamp)
+                        orders.extend(rep_orders)
+
+        elif sig.signal_type in {SignalType.CLOSE_CE, SignalType.CLOSE_PE, SignalType.FORCE_SQUARE_OFF}:
+            target_sym = sig.target_contract.symbol if sig.target_contract else None
+            positions_to_close = []
+            for p in self.oms.get_all_positions():
+                if p.is_open and p.net_qty != 0:
+                    if target_sym is None or p.symbol == target_sym:
+                        positions_to_close.append(p)
+
+            for p in positions_to_close:
+                exit_side = OrderSide.SELL if p.net_qty > 0 else OrderSide.BUY
+                qty = abs(p.net_qty)
+                contract = self.instrument_registry.get_contract_by_symbol(p.symbol)
+
+                exit_tag = "REVERSAL_EXIT" if "reversal" in sig.reason.lower() else (
+                    "SQUARE_OFF" if "square" in sig.reason.lower() else "RISK_EXIT"
+                )
+                intent = OrderIntent(
+                    intent_id=f"INT-EXIT-{uuid4().hex[:8].upper()}",
+                    client_order_id=f"ORD-EXIT-{uuid4().hex[:8].upper()}",
+                    session_id=self.active_session.session_id if self.active_session else "SESSION-DEFAULT",
+                    strategy_name="NIFTY_ORB",
+                    strategy_version=self.active_strategy_config.version if hasattr(self.active_strategy_config, "version") else 1,
+                    symbol=p.symbol,
+                    side=exit_side,
+                    order_type=OrderType.MARKET,
+                    product_type=ProductType.INTRADAY,
+                    qty=qty,
+                    tag=exit_tag[:20],
+                    created_at=to_utc(timestamp),
+                )
+                order = await self.oms.submit_order_intent(intent, contract=contract, evaluation_time=timestamp)
+                orders.append(order)
+
+                if order.fills and self.strategy:
+                    for f in order.fills:
+                        rep_sigs = self.strategy.on_order_fill(f)
+                        for rep in rep_sigs:
+                            rep_orders = await self._execute_signal(rep, timestamp)
+                            orders.extend(rep_orders)
+
+        return orders
 
     # --------------------------------------------------------------------------
     # Risk Telemetry & Controls
@@ -839,10 +1690,14 @@ NSE:NIFTY26NOV25100PE,NSE:NIFTY50-INDEX,25100.0,PE,2026-11-06,25,0.05
             is_profit_protection_active=snapshot.is_profit_protection_active,
             profit_protection_status="LOCKED" if snapshot.is_profit_protection_active else "INACTIVE",
             profit_floor=snapshot.profit_floor,
+            profit_protection_trigger=self.risk_engine.risk_config.profit_protection_trigger,
+            profit_protection_min_lock=self.risk_engine.risk_config.profit_protection_min_lock,
+            profit_step=self.risk_engine.risk_config.profit_trailing_step_profit,
+            profit_lock_increment=self.risk_engine.risk_config.profit_trailing_step_lock,
             open_positions_count=open_count,
             is_data_stale=False,
-            is_synthetic=True,
-            data_source="PAPER_SIMULATOR",
+            is_synthetic=not self.live_data_connected and not self.historical_replay_active,
+            data_source="LIVE" if self.live_data_connected else ("HISTORICAL" if self.historical_replay_active else "SYNTHETIC"),
         )
 
     async def list_audit_events(self, limit: int = 50) -> List[AuditEventResponseItem]:
@@ -978,7 +1833,8 @@ NSE:NIFTY26NOV25100PE,NSE:NIFTY50-INDEX,25100.0,PE,2026-11-06,25,0.05
                     updated_at=o.updated_at,
                     transitions=transitions,
                     fills=fills,
-                    is_synthetic=True,
+                    is_synthetic=not self.live_data_connected and not self.historical_replay_active,
+                    data_source="LIVE" if self.live_data_connected else ("HISTORICAL" if self.historical_replay_active else "SYNTHETIC"),
                 )
             )
         return sorted(orders, key=lambda x: x.submitted_at, reverse=True)
@@ -986,6 +1842,8 @@ NSE:NIFTY26NOV25100PE,NSE:NIFTY50-INDEX,25100.0,PE,2026-11-06,25,0.05
     def list_positions(self) -> List[PositionResponseItem]:
         """Return list of all current positions."""
         positions: List[PositionResponseItem] = []
+        data_source = "LIVE" if self.live_data_connected else ("HISTORICAL" if self.historical_replay_active else "SYNTHETIC")
+        is_synthetic = not self.live_data_connected and not self.historical_replay_active
         for p in self.oms.get_all_positions():
             positions.append(
                 PositionResponseItem(
@@ -1005,7 +1863,8 @@ NSE:NIFTY26NOV25100PE,NSE:NIFTY50-INDEX,25100.0,PE,2026-11-06,25,0.05
                     is_open=p.is_open,
                     opened_at=p.opened_at or now_utc(),
                     closed_at=p.closed_at,
-                    is_synthetic=True,
+                    is_synthetic=is_synthetic,
+                    data_source=data_source,
                 )
             )
         return positions
@@ -1062,7 +1921,8 @@ NSE:NIFTY26NOV25100PE,NSE:NIFTY50-INDEX,25100.0,PE,2026-11-06,25,0.05
             is_open=updated_pos.is_open,
             opened_at=updated_pos.opened_at or now_utc(),
             closed_at=updated_pos.closed_at,
-            is_synthetic=True,
+            is_synthetic=not self.live_data_connected and not self.historical_replay_active,
+            data_source="LIVE" if self.live_data_connected else ("HISTORICAL" if self.historical_replay_active else "SYNTHETIC"),
         )
 
     # --------------------------------------------------------------------------
@@ -1080,12 +1940,31 @@ NSE:NIFTY26NOV25100PE,NSE:NIFTY50-INDEX,25100.0,PE,2026-11-06,25,0.05
             or req.dataset_id == "DEFAULT_SYNTHETIC"
         )
 
+        is_historical_spot = req.dataset_id == "HISTORICAL_SPOT_8D"
+        filtered_spot: List[Candle] = []
+
         # Check date range validity
         if is_synthetic_request:
             # Synthetic dataset is strictly available for 2026-11-06
             if req.start_date > date(2026, 11, 6) or req.end_date < date(2026, 11, 6):
                 raise ValueError(
                     f"Synthetic dataset '{req.dataset_id}' is only available for 2026-11-06. "
+                    f"Requested range ({req.start_date} to {req.end_date}) contains no data."
+                )
+        elif is_historical_spot:
+            csv_path = Path("data/historical/real_nifty_spot_8d.csv")
+            if not csv_path.exists():
+                raise ValueError("Historical spot dataset 'real_nifty_spot_8d.csv' not found.")
+            df = pd.read_csv(csv_path)
+            validator = OfflineDatasetValidator()
+            report, all_spot = validator.validate_index_dataframe(df, source_name="real_nifty_spot_8d.csv")
+            filtered_spot = [
+                c for c in all_spot
+                if req.start_date <= to_ist(c.timestamp).date() <= req.end_date
+            ]
+            if not filtered_spot:
+                raise ValueError(
+                    f"Historical dataset 'HISTORICAL_SPOT_8D' has data from 2026-10-22 to 2026-11-02. "
                     f"Requested range ({req.start_date} to {req.end_date}) contains no data."
                 )
         else:
@@ -1121,6 +2000,76 @@ NSE:NIFTY26NOV25100PE,NSE:NIFTY50-INDEX,25100.0,PE,2026-11-06,25,0.05
             slippage_points=req.slippage_points,
             brokerage_per_order=req.brokerage_per_order,
         )
+
+        if is_historical_spot:
+            backtester = UnderlyingPointBacktester(strategy_config)
+            bt_res = backtester.run(filtered_spot)
+            raw_trades = bt_res.get("trades", [])
+
+            completed_trades: List[BacktestTrade] = []
+            lot_sz = strategy_config.lot_size
+            qty = strategy_config.lots * lot_sz
+            for tr in raw_trades:
+                entry_date_obj = datetime.strptime(tr["date"], "%Y-%m-%d").date()
+                entry_time_obj = datetime.strptime(tr["entry_time"], "%H:%M:%S").time()
+                exit_time_obj = datetime.strptime(tr["exit_time"], "%H:%M:%S").time()
+
+                entry_dt = to_utc(IST_TZ.localize(datetime.combine(entry_date_obj, entry_time_obj)))
+                exit_dt = to_utc(IST_TZ.localize(datetime.combine(entry_date_obj, exit_time_obj)))
+
+                entry_p = Decimal(str(tr["entry_price"]))
+                exit_p = Decimal(str(tr["exit_price"]))
+                pnl_pts = Decimal(str(tr["pnl_points"]))
+                gross_pnl = pnl_pts * Decimal(str(qty))
+                costs = exec_config.brokerage_per_order * Decimal("2")
+                net_pnl = gross_pnl - costs
+
+                completed_trades.append(
+                    BacktestTrade(
+                        trade_id=f"TRD-{uuid4().hex[:8].upper()}",
+                        symbol="NSE:NIFTY50-INDEX",
+                        underlying_symbol="NSE:NIFTY50-INDEX",
+                        option_type=OptionType.CE if tr["direction"] == "LONG" else OptionType.PE,
+                        strike=entry_p,
+                        direction=tr["direction"],
+                        entry_time=entry_dt,
+                        exit_time=exit_dt,
+                        entry_price=entry_p,
+                        exit_price=exit_p,
+                        qty=qty,
+                        lot_size=lot_sz,
+                        gross_pnl=gross_pnl.quantize(Decimal("0.01")),
+                        trading_costs=costs.quantize(Decimal("0.01")),
+                        net_pnl=net_pnl.quantize(Decimal("0.01")),
+                        exit_reason=tr["exit_reason"],
+                        strategy_version=getattr(strategy_config, "version", 1),
+                    )
+                )
+
+            calc = MetricsCalculator(initial_capital=req.initial_capital)
+            metrics = calc.compute(completed_trades)
+            run_result = BacktestRun(
+                run_id=f"BRUN-{uuid4().hex[:8].upper()}",
+                strategy_name="NIFTY_ORB_UNDERLYING",
+                strategy_version=getattr(strategy_config, "version", 1),
+                strategy_config_snapshot=strategy_config.model_dump(mode="json"),
+                dataset_id=req.dataset_id,
+                start_date=req.start_date,
+                end_date=req.end_date,
+                execution_config=exec_config,
+                metrics=metrics,
+                diagnostics=BacktestDiagnostics(),
+                trades=completed_trades,
+                is_synthetic=False,
+                is_underlying_only=True,
+                initial_capital=req.initial_capital,
+                dataset_provenance="GENUINE_SPOT_1M (Yahoo Finance / Free Public Feed)",
+                dataset_fingerprint="HISTORICAL_8D_NIFTY50",
+            )
+            self.sample_backtests[run_result.run_id] = run_result
+            if self.repo:
+                await self.repo.save_backtest_run(run_result)
+            return self._format_backtest_details(run_result)
 
         engine = DiscreteEventBacktestEngine(
             strategy_config=strategy_config,
@@ -1171,7 +2120,8 @@ NSE:NIFTY26NOV25100PE,NSE:NIFTY50-INDEX,25100.0,PE,2026-11-06,25,0.05
                         end_date=p.end_date,
                         strategy_name=p.strategy_name,
                         strategy_version=p.strategy_version,
-                        is_synthetic=True,
+                        is_synthetic=not self.live_data_connected and not self.historical_replay_active,
+            data_source="LIVE" if self.live_data_connected else ("HISTORICAL" if self.historical_replay_active else "SYNTHETIC"),
                         net_profit=metrics.net_pnl,
                         total_trades=metrics.total_trades,
                         win_rate_pct=metrics.win_rate,
@@ -1274,17 +2224,53 @@ NSE:NIFTY26NOV25100PE,NSE:NIFTY50-INDEX,25100.0,PE,2026-11-06,25,0.05
 
     def _format_backtest_summary(self, run: BacktestRun) -> BacktestSummaryResponse:
         m = run.metrics
-        # Compute Sharpe ratio deterministically from trade P&L
-        sharpe = Decimal("0.00")
+
+        # 1. Trade-level Net P&L Mean / Stdev Ratio (descriptive trade consistency metric)
+        trade_pnl_ratio: Optional[Decimal] = None
         if len(run.trades) > 1:
             try:
                 trade_pnls = [float(t.net_pnl) for t in run.trades]
                 mean_pnl = statistics.mean(trade_pnls)
                 stdev_pnl = statistics.stdev(trade_pnls)
                 if stdev_pnl > 0:
-                    sharpe = (Decimal(str(mean_pnl)) / Decimal(str(stdev_pnl))).quantize(Decimal("0.01"))
+                    trade_pnl_ratio = (Decimal(str(mean_pnl)) / Decimal(str(stdev_pnl))).quantize(Decimal("0.01"))
             except Exception:
-                sharpe = Decimal("0.00")
+                trade_pnl_ratio = None
+
+        # 2. Portfolio-Return Annualized Sharpe Ratio (Option A when >= 2 daily periods, Option B when unavailable)
+        sharpe: Optional[Decimal] = None
+        sharpe_reason: Optional[str] = None
+
+        daily_pnls = list(m.daily_pnl.values())
+        if len(daily_pnls) < 2:
+            sharpe = None
+            sharpe_reason = (
+                f"Insufficient daily return observations (minimum 2 trading days required; found {len(daily_pnls)})"
+            )
+        else:
+            try:
+                capital = getattr(run, "initial_capital", Decimal("100000.00")) or Decimal("100000.00")
+                daily_returns: List[float] = []
+                running_cap = capital
+                for pnl in daily_pnls:
+                    if running_cap > Decimal("0.00"):
+                        ret = float(pnl / running_cap)
+                    else:
+                        ret = 0.0
+                    daily_returns.append(ret)
+                    running_cap += pnl
+
+                mean_ret = statistics.mean(daily_returns)
+                stdev_ret = statistics.stdev(daily_returns)
+                if stdev_ret > 0:
+                    ann_sharpe = (mean_ret / stdev_ret) * (252.0 ** 0.5)
+                    sharpe = Decimal(str(ann_sharpe)).quantize(Decimal("0.01"))
+                else:
+                    sharpe = None
+                    sharpe_reason = "Zero variance in daily portfolio returns"
+            except Exception as e:
+                sharpe = None
+                sharpe_reason = f"Sharpe calculation error: {str(e)}"
 
         return BacktestSummaryResponse(
             run_id=run.run_id,
@@ -1293,7 +2279,9 @@ NSE:NIFTY26NOV25100PE,NSE:NIFTY50-INDEX,25100.0,PE,2026-11-06,25,0.05
             end_date=run.end_date,
             strategy_name=run.strategy_name,
             strategy_version=run.strategy_version,
-            is_synthetic=True,
+            is_synthetic=getattr(run, "is_synthetic", True),
+            is_underlying_only=getattr(run, "is_underlying_only", False),
+            provenance=getattr(run, "dataset_provenance", None),
             net_profit=m.net_pnl,
             total_trades=m.total_trades,
             win_rate_pct=m.win_rate,
@@ -1301,6 +2289,8 @@ NSE:NIFTY26NOV25100PE,NSE:NIFTY50-INDEX,25100.0,PE,2026-11-06,25,0.05
             max_drawdown_amount=m.max_drawdown,
             max_drawdown_pct=m.max_drawdown_pct,
             sharpe_ratio=sharpe,
+            sharpe_ratio_reason=sharpe_reason,
+            trade_pnl_mean_std_ratio=trade_pnl_ratio,
             expectancy=m.expectancy,
             created_at=run.created_at,
         )
@@ -1308,12 +2298,13 @@ NSE:NIFTY26NOV25100PE,NSE:NIFTY50-INDEX,25100.0,PE,2026-11-06,25,0.05
     def _format_backtest_details(self, run: BacktestRun) -> BacktestDetailsResponse:
         summary = self._format_backtest_summary(run)
         equity_curve: List[BacktestEquityPoint] = []
-        running_equity = run.execution_config.brokerage_per_order * Decimal("0") + Decimal("100000.00")
+        running_equity = getattr(run, "initial_capital", Decimal("100000.00")) or Decimal("100000.00")
         peak_equity = running_equity
 
+        start_dt = to_utc(IST_TZ.localize(datetime.combine(run.start_date, time(9, 15, 0))))
         equity_curve.append(
             BacktestEquityPoint(
-                timestamp=to_utc(IST_TZ.localize(datetime(2026, 11, 6, 9, 15, 0))),
+                timestamp=start_dt,
                 equity=running_equity,
                 drawdown=Decimal("0.00"),
             )

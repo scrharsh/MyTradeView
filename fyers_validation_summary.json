@@ -1,0 +1,74 @@
+{
+  "CHECK_1_INSPECT_INTEGRATION": {
+    "status": "PASS",
+    "evidence": "FyersMarketDataAdapter, FyersBrokerClient, and WorkstationService fully implemented and inspected."
+  },
+  "CHECK_2_AUTHENTICATION": {
+    "status": "BLOCKED",
+    "evidence": {
+      "client_id_configured": true,
+      "client_id_masked": "20Q...200",
+      "secret_key_configured": true,
+      "secret_key_masked": "Jfu...m4D",
+      "token_file_exists": false,
+      "access_token_present": false,
+      "access_token_masked": "<NOT_SET>"
+    },
+    "reason": "FYERS daily OAuth2 access_token is unconfigured in .env and secrets/fyers_token.json is missing. FYERS API v3 requires a daily session access token generated via 2FA OAuth login. System safely fails closed; credentials and secrets remain completely unexposed."
+  },
+  "CHECK_3_LIVE_SUBSCRIPTION": {
+    "status": "BLOCKED",
+    "evidence": {
+      "subscribed": false,
+      "feed_status": "DISCONNECTED",
+      "incoming_candles": 0,
+      "fail_closed_active": true
+    },
+    "reason": "Live market data subscription to NSE:NIFTY50-INDEX is blocked because FYERS session authentication is unauthenticated (daily access token missing). Live ticks cannot be subscribed without active auth."
+  },
+  "CHECK_4_ANOMALY_DETECTION_AND_FAIL_CLOSED": {
+    "status": "PASS",
+    "evidence": {
+      "duplicate_candle_rejected": true,
+      "out_of_order_candle_rejected": true,
+      "missing_candle_gap_recorded": true,
+      "stale_feed_candle_flagged": true,
+      "live_execution_fail_closed_blocked": true,
+      "anomaly_stats": {
+        "stale": 1,
+        "missing": 1,
+        "duplicate": 1,
+        "out_of_order": 1
+      }
+    },
+    "reason": "All 5 safety and anomaly handling mechanisms verified functional."
+  },
+  "CHECK_5_DATA_ISOLATION": {
+    "status": "PASS",
+    "evidence": {
+      "disconnected_source": "SYNTHETIC",
+      "disconnected_is_synthetic": true,
+      "historical_replay_source": "HISTORICAL",
+      "historical_is_synthetic": false,
+      "unauthenticated_live_feed_connected": false,
+      "unauthenticated_live_source_fallback": "SYNTHETIC"
+    },
+    "reason": "Dynamic labeling guarantees strict isolation. Live status cannot be claimed without verified authentication."
+  },
+  "CHECK_6_EXECUTION_MODE_PAPER": {
+    "status": "PASS",
+    "evidence": "execution_mode=paper"
+  },
+  "CHECK_7_NO_REAL_BROKER_ORDERS": {
+    "status": "PASS",
+    "evidence": "PaperBrokerClient active. Live broker execution disabled by safety interlock."
+  },
+  "CHECK_8_NO_AUTOMATIC_DEMO_SEEDING": {
+    "status": "PASS",
+    "evidence": "orders=0, positions=0"
+  },
+  "CHECK_9_BASELINE_STRATEGY_UNMODIFIED": {
+    "status": "PASS",
+    "evidence": "active_config_id=NIFTY_ORB_V1, version=1"
+  }
+}

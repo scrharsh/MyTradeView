@@ -13,6 +13,7 @@ from typing import AsyncGenerator
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
+from src.api.routes.auth import router as auth_router
 from src.api.routes.backtest import router as backtest_router
 from src.api.routes.health import router as health_router
 from src.api.routes.market_data import router as market_data_router
@@ -34,6 +35,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     await workstation_service.initialize()
     yield
     logger.info("Shutting down MyTradeView Backend API...")
+    await workstation_service.stop_live_feed()
     if workstation_service.paper_broker and hasattr(workstation_service.paper_broker, "disconnect"):
         await workstation_service.paper_broker.disconnect()
 
@@ -57,6 +59,7 @@ app.add_middleware(
 # Register REST Routers under /api/v1
 API_V1_PREFIX = "/api/v1"
 app.include_router(health_router, prefix=API_V1_PREFIX)
+app.include_router(auth_router, prefix=API_V1_PREFIX)
 app.include_router(strategies_router, prefix=API_V1_PREFIX)
 app.include_router(market_data_router, prefix=API_V1_PREFIX)
 app.include_router(sessions_router, prefix=API_V1_PREFIX)

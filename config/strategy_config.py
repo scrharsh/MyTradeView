@@ -86,10 +86,13 @@ class StrategyConfig(BaseModel):
     @classmethod
     def validate_trading_days(cls, v: List[str]) -> List[str]:
         valid_days = {d.value for d in TradingDay}
+        normalized: List[str] = []
         for day in v:
-            if day not in valid_days:
+            clean = day.strip().capitalize()
+            if clean not in valid_days:
                 raise ValueError(f"Invalid trading day '{day}'. Must be one of {valid_days}")
-        return v
+            normalized.append(clean)
+        return normalized
 
     def validate_executable_for_trading(self) -> None:
         """

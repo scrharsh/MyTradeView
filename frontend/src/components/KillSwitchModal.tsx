@@ -46,11 +46,11 @@ export function KillSwitchModal({ isOpen, onClose, onSuccess }: KillSwitchModalP
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4">
-      <div className="w-full max-w-lg rounded-lg border border-rose-600/60 bg-[#0e141f] shadow-2xl shadow-rose-950/50 overflow-hidden font-sans">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/85 backdrop-blur-sm p-4">
+      <div className="w-full max-w-lg rounded-lg border border-rose-600/60 bg-[#090d14] shadow-2xl shadow-rose-950/60 overflow-hidden font-mono text-xs">
         {/* Header */}
         <div className="flex items-center justify-between border-b border-rose-900/40 bg-rose-950/30 px-5 py-3.5">
-          <div className="flex items-center space-x-2 text-rose-400 font-mono font-bold text-sm tracking-wide">
+          <div className="flex items-center space-x-2 text-rose-400 font-bold text-sm tracking-wide">
             <AlertOctagon className="w-5 h-5 text-rose-500 animate-pulse" />
             <span>EMERGENCY KILL-SWITCH PROTOCOL</span>
           </div>
@@ -63,15 +63,15 @@ export function KillSwitchModal({ isOpen, onClose, onSuccess }: KillSwitchModalP
         </div>
 
         {/* Content */}
-        <div className="p-6 space-y-4">
-          <div className="rounded border border-rose-500/30 bg-rose-950/20 p-3.5 text-xs text-rose-300 leading-relaxed font-mono">
+        <div className="p-5 space-y-4">
+          <div className="rounded border border-rose-500/30 bg-rose-950/20 p-3.5 text-xs text-rose-300 leading-relaxed">
             <strong>WARNING:</strong> This action immediately terminates the active trading session,
             cancels all open/pending orders at the OMS and Broker, flattens all open derivative
             positions at market, and locks strategy execution into an emergency locked-out state.
           </div>
 
           {result ? (
-            <div className="rounded border border-emerald-500/30 bg-emerald-950/20 p-4 text-xs font-mono text-emerald-300 space-y-2">
+            <div className="rounded border border-emerald-500/30 bg-emerald-950/20 p-4 text-xs text-emerald-300 space-y-2">
               <div className="flex items-center space-x-2 font-bold text-emerald-400">
                 <CheckCircle2 className="w-4 h-4" />
                 <span>PROTOCOL EXECUTED SUCCESSFULLY</span>
@@ -80,7 +80,7 @@ export function KillSwitchModal({ isOpen, onClose, onSuccess }: KillSwitchModalP
               <div className="pt-2">
                 <button
                   onClick={handleClose}
-                  className="w-full py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded text-xs font-mono font-semibold"
+                  className="w-full py-2 btn-secondary text-xs"
                 >
                   Dismiss
                 </button>
@@ -89,17 +89,17 @@ export function KillSwitchModal({ isOpen, onClose, onSuccess }: KillSwitchModalP
           ) : (
             <>
               <div className="space-y-1.5">
-                <label className="text-xs font-mono text-slate-300">Kill-Switch Reason</label>
+                <label className="text-slate-300 font-medium">Kill-Switch Reason</label>
                 <input
                   type="text"
                   value={reason}
                   onChange={(e) => setReason(e.target.value)}
-                  className="w-full rounded bg-[#151c28] border border-[#232f42] px-3 py-2 text-xs font-mono text-slate-200 focus:outline-none focus:border-rose-500"
+                  className="input-field text-slate-200"
                 />
               </div>
 
-              <div className="space-y-1.5 pt-2">
-                <label className="text-xs font-mono text-slate-300">
+              <div className="space-y-1.5 pt-1">
+                <label className="text-slate-300">
                   Type <span className="font-bold text-rose-400">CONFIRM</span> to authenticate
                   emergency liquidation:
                 </label>
@@ -108,21 +108,21 @@ export function KillSwitchModal({ isOpen, onClose, onSuccess }: KillSwitchModalP
                   placeholder="Type CONFIRM"
                   value={confirmationText}
                   onChange={(e) => setConfirmationText(e.target.value)}
-                  className="w-full rounded bg-[#151c28] border border-[#232f42] px-3 py-2 text-xs font-mono text-slate-100 placeholder:text-slate-600 focus:outline-none focus:border-rose-500"
+                  className="input-field text-slate-100 placeholder:text-slate-600 focus:border-rose-500"
                 />
               </div>
 
               {error && (
-                <div className="rounded border border-rose-500/40 bg-rose-950/40 p-2.5 text-xs font-mono text-rose-300">
+                <div className="rounded border border-rose-500/40 bg-rose-950/40 p-2.5 text-xs text-rose-300">
                   {error}
                 </div>
               )}
 
-              <div className="flex items-center justify-end space-x-3 pt-3 border-t border-[#1c2638]">
+              <div className="flex items-center justify-end space-x-3 pt-3 border-t border-[#1a2336]">
                 <button
                   type="button"
                   onClick={handleClose}
-                  className="px-4 py-2 text-xs font-mono text-slate-400 hover:text-slate-200 transition-colors"
+                  className="btn-secondary text-xs"
                 >
                   Cancel
                 </button>
@@ -130,10 +130,10 @@ export function KillSwitchModal({ isOpen, onClose, onSuccess }: KillSwitchModalP
                   type="button"
                   onClick={handleExecute}
                   disabled={!isConfirmed || isSubmitting}
-                  className={`flex items-center space-x-1.5 px-4 py-2 text-xs font-mono font-bold rounded transition-colors ${
+                  className={`flex items-center space-x-1.5 px-4 py-2 text-xs font-bold rounded transition-all ${
                     isConfirmed && !isSubmitting
-                      ? "bg-rose-600 hover:bg-rose-500 text-white shadow-lg shadow-rose-950/60"
-                      : "bg-slate-800 text-slate-500 cursor-not-allowed"
+                      ? "btn-danger shadow-lg shadow-rose-950/60"
+                      : "bg-slate-800 text-slate-500 cursor-not-allowed border border-slate-700/50"
                   }`}
                 >
                   <ShieldAlert className="w-3.5 h-3.5" />
@@ -147,4 +147,3 @@ export function KillSwitchModal({ isOpen, onClose, onSuccess }: KillSwitchModalP
     </div>
   );
 }
-

@@ -2,7 +2,7 @@
 
 from datetime import date, datetime, time
 from decimal import Decimal
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 from uuid import uuid4
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -49,14 +49,27 @@ class StrategyConfigSnapshot(BaseModel):
     config_id: str = Field(default_factory=lambda: f"CFG_{uuid4().hex[:12]}")
     version: int = Field(default=1, ge=1)
     underlying_symbol: str = "NSE:NIFTY50-INDEX"
+    strategy_name: str = "NIFTY ORB Production Strategy"
     orb_start_time: time = time(9, 16, 0)
     orb_end_time: time = time(9, 45, 0)
     mandatory_exit_time: time = time(15, 10, 0)
     lots: int = 1
     lot_size: int = 25
+    trading_days: List[str] = Field(default_factory=lambda: ["Monday", "Thursday", "Friday"])
+    breakout_confirmation_mode: str = "candle_close"
+    range_boundary_mode: str = "up_to_0944_close"
+    order_execution_style: str = "market"
+    expiry_day_selection: str = "current_weekly_0dte"
+    strike_selection_mode: str = "ATM"
+    entry_start_time: time = time(9, 45, 0)
+    entry_end_time: time = time(15, 15, 0)
     max_daily_loss_limit: Decimal = Decimal("3000.00")
     profit_protection_trigger: Decimal = Decimal("3000.00")
     profit_protection_min_lock: Decimal = Decimal("500.00")
+    profit_trailing_mode: str = "lock_and_trail"
+    profit_step: Decimal = Decimal("1000.00")
+    profit_lock_increment: Decimal = Decimal("500.00")
+    parameters: Dict[str, Any] = Field(default_factory=dict)
     created_at: datetime = Field(default_factory=now_utc)
 
 

@@ -192,6 +192,16 @@ class InstrumentMasterRegistry:
         self._last_report = report
         return report
 
+    def register_option_contract(self, contract: OptionContract) -> None:
+        """Register a validated OptionContract directly into the authoritative registry."""
+        self._options[contract.symbol] = contract
+        self._options_by_tuple[(contract.underlying, contract.expiry_date, contract.strike, contract.option_type)] = contract
+        if contract.underlying not in self._expiries_by_underlying:
+            self._expiries_by_underlying[contract.underlying] = []
+        if contract.expiry_date not in self._expiries_by_underlying[contract.underlying]:
+            self._expiries_by_underlying[contract.underlying].append(contract.expiry_date)
+            self._expiries_by_underlying[contract.underlying].sort()
+
     def get_contract(
         self,
         underlying: str,

@@ -91,20 +91,33 @@ class DiscreteEventBacktestEngine:
         spot_candles: List[Candle],
         option_candles: Dict[str, List[Candle]],
         dataset_id: str = "SYNTHETIC_DATASET",
+        dataset_fingerprint: Optional[str] = None,
+        dataset_provenance: Optional[str] = None,
+        is_synthetic: Optional[bool] = None,
     ) -> BacktestRun:
         """
         Execute deterministic discrete-event backtest across the provided candle history.
         """
+        synth_flag = is_synthetic if is_synthetic is not None else (
+            dataset_id.startswith("SYNTHETIC")
+            or dataset_id.startswith("TEST")
+            or dataset_id == "DEFAULT_SYNTHETIC"
+        )
+
         if not spot_candles:
             empty_metrics = self.metrics_calculator.compute([])
             return BacktestRun(
                 dataset_id=dataset_id,
+                dataset_fingerprint=dataset_fingerprint,
+                dataset_provenance=dataset_provenance,
+                is_synthetic=synth_flag,
                 start_date=date.today(),
                 end_date=date.today(),
                 strategy_name="NIFTY_ORB",
                 strategy_version=getattr(self.strategy_config, "version", 1),
                 strategy_config_snapshot=self.strategy_config.model_dump(mode="json"),
                 execution_config=self.execution_config,
+                initial_capital=self.initial_capital,
                 metrics=empty_metrics,
                 diagnostics=BacktestDiagnostics(),
                 trades=[],
@@ -407,12 +420,16 @@ class DiscreteEventBacktestEngine:
 
         return BacktestRun(
             dataset_id=dataset_id,
+            dataset_fingerprint=dataset_fingerprint,
+            dataset_provenance=dataset_provenance,
+            is_synthetic=synth_flag,
             start_date=start_date,
             end_date=end_date,
             strategy_name="NIFTY_ORB",
             strategy_version=getattr(self.strategy_config, "version", 1),
             strategy_config_snapshot=self.strategy_config.model_dump(mode="json"),
             execution_config=self.execution_config,
+            initial_capital=self.initial_capital,
             metrics=metrics,
             diagnostics=diag_model,
             trades=completed_trades,

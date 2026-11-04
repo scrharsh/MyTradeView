@@ -39,6 +39,15 @@ class MtmTracker(BaseMtmTracker):
         self._risk_events: List[Dict[str, Any]] = []
         self._is_data_stale: bool = False
 
+    def reset(self) -> None:
+        """Clear all tracked positions and reset MTM state."""
+        self._positions.clear()
+        self._closed_positions.clear()
+        self._price_timestamps.clear()
+        self._peak_mtm = Decimal("0.00")
+        self._risk_events.clear()
+        self._is_data_stale = False
+
     # --------------------------------------------------------------------------
     # Position & Fill Management
     # --------------------------------------------------------------------------
