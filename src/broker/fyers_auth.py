@@ -130,9 +130,30 @@ class FyersAuthManager:
             return None
         return data["access_token"]
 
+    def _cached_token_is_expired(self) -> bool:
+        data = self._read_cache()
+        if not data or not data.get("access_token") or not data.get("issued_at"):
+            return False
+        try:
+            return datetime.fromisoformat(data["issued_at"]) < self._rollover_boundary()
+        except (TypeError, ValueError):
+            return False
+
     def get_access_token(self) -> Optional[str]:
         """Token for in-process use only (e.g. WebSocket). Never log or return via API."""
         return self._load_raw_token()
+
+    def build_model(self) -> Any:
+        """Build an authenticated FYERS REST model for in-process broker use.
+
+        The token is intentionally not returned by this method or included in
+        diagnostics; callers receive only the SDK client instance.
+        """
+        token = self._load_raw_token()
+        if not self.client_id or not token or not self._validated:
+            raise FyersAuthError("FYERS session is not authenticated.")
+        self._log_dir.mkdir(parents=True, exist_ok=True)
+        return self._model_factory(self.client_id, token, str(self._log_dir))
 
     def save_token(self, token: str) -> None:
         self.token_cache_path.parent.mkdir(parents=True, exist_ok=True)
@@ -241,7 +262,7 @@ class FyersAuthManager:
         """Authenticate for real: call the FYERS profile endpoint with the stored token."""
         token = self._load_raw_token()
         if not self.client_id or not token:
-            self._set_state(False, "NO_TOKEN")
+            self._set_state(False, "TOKEN_EXPIRED" if self._cached_token_is_expired() else "NO_TOKEN")
             return self.status()
         try:
             resp = await asyncio.wait_for(asyncio.to_thread(self._profile_sync, token), timeout=15)
@@ -291,4 +312,3 @@ class FyersAuthManager:
             "reason": self._reason,
             "redirect_uri": self.redirect_uri,
         }
-

@@ -15,6 +15,7 @@ All parameters are strictly typed, checked at application boot, and immutable du
 | **Execution Environment** | | | | |
 | `EXECUTION_MODE` | `str` | `paper` | `simulation`, `paper`, `live` | Operational mode. Default is **`paper`**. `simulation` = historical replay; `paper` = live feed + simulated orders; `live` = real broker execution. |
 | `LIVE_TRADING_ACK` | `bool` | `false` | `true`, `false` | Dual-safety interlock flag. `EXECUTION_MODE=live` will raise an immediate error if this flag is not explicitly `true`. |
+| `LIVE_BROKER_ENABLED` | `bool` | `false` | `true`, `false` | Independent live-broker interlock. Live mode is rejected unless this is explicitly `true`. |
 | **Strategy Parameters** | | | | |
 | `STRATEGY_UNDERLYING_SYMBOL` | `str` | `NSE:NIFTY50-INDEX` | Valid FYERS Index Symbol | Underlying index to monitor for opening range breakouts. |
 | `STRATEGY_ORB_START_TIME` | `time` | `09:16:00` | `HH:MM:SS` (IST) | Opening time of the range formation window. |
@@ -38,6 +39,8 @@ All parameters are strictly typed, checked at application boot, and immutable du
 | `FYERS_REDIRECT_URI` | `str` | `https://127.0.0.1:5000/login` | Valid URI | Registered redirect URI matching developer portal configuration. |
 | `FYERS_USER_ID` | `str` | `None` | FYERS Login ID | FYERS account username/client ID. |
 | `FYERS_TOKEN_CACHE_PATH` | `Path` | `./secrets/fyers_token.json` | Valid file path | Secure local path storing cached access token and expiration metadata. |
+| `FYERS_INSTRUMENT_MASTER_CACHE_PATH` | `Path` | `./secrets/NSE_FO.csv` | Valid file path | Local cache for the official FYERS NSE derivatives symbol master. Live startup refreshes it when older than 24 hours. |
+| `FYERS_INSTRUMENT_MASTER_URL` | `str` | `https://public.fyers.in/sym_details/NSE_FO.csv` | Official FYERS symbol-master URL | Override only for an approved FYERS-supported mirror or test fixture. |
 | **Database & Persistence** | | | | |
 | `DATABASE_URL` | `str` | `postgresql+asyncpg://postgres:postgres@localhost:5432/mytradeview` | PostgreSQL DSN | Primary database connection string for live and paper trading state storage. |
 | `TEST_DATABASE_URL` | `str` | `sqlite+aiosqlite:///./test_local.db` | SQLite DSN | Isolated local database connection string for unit tests and local simulations. |
@@ -69,5 +72,6 @@ To ensure that unconfirmed backtest parameters are never silently defaulted or g
 ## 4. Secrets Management Best Practices
 
 1. **Zero Secret Check-ins:** The `.env` file is excluded via `.gitignore`. An `.env.example` file is maintained with placeholder values only.
-2. **Access Token Refresh:** FYERS access tokens expire every 24 hours. Tokens are obtained through an explicit authorization script (`src/broker/auth.py`), serialized into `./secrets/fyers_token.json` with restricted filesystem permissions (`chmod 600`), and never logged.
-3. **Structured Log Sanitization:** The logging subsystem intercepts log records and redacts fields matching regex patterns for API keys, secret hashes, access tokens, and phone numbers.
+2. **Daily Access Token:** FYERS access tokens expire daily. Run `python scripts/fyers_login.py` locally after browser authentication, or use `--status` to validate the existing cache. The token is exchanged through FYERS OAuth, stored in `./secrets/fyers_token.json` with restricted filesystem permissions (`chmod 600`), and never logged.
+3. **Instrument Master:** Live startup downloads `NSE_FO.csv` from the official FYERS public symbol-master endpoint when the cache is stale. The response is parsed and validated before replacing the cache; a failed download or invalid file blocks live startup.
+4. **Structured Log Sanitization:** The logging subsystem intercepts log records and redacts fields matching regex patterns for API keys, secret hashes, access tokens, and phone numbers.

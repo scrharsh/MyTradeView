@@ -20,6 +20,7 @@ dependencies = [
     "asyncpg>=0.29.0",
     "aiosqlite>=0.20.0",
     "pandas>=2.2.0",
+    "pyarrow>=15.0.0",
     "numpy>=1.26.0",
     "pytz>=2024.1",
     "apscheduler>=3.10.4",
@@ -50,4 +51,3 @@ warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = true
 ignore_missing_imports = true
-

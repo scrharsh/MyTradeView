@@ -14,6 +14,7 @@ from src.common.time_utils import to_utc
 from src.core.models import Candle, Instrument, MarketTick, OptionContract
 from src.data.base import MarketDataProvider
 from src.data.cache import MarketDataCache
+from src.data.instrument_master import InstrumentMasterRegistry
 
 
 class FyersMarketDataAdapter(MarketDataProvider):
@@ -28,6 +29,7 @@ class FyersMarketDataAdapter(MarketDataProvider):
         cache: Optional[MarketDataCache] = None,
         credentials_provider: Optional[Callable[[], Optional[Tuple[str, str]]]] = None,
         socket_factory: Optional[Callable[..., Any]] = None,
+        instrument_registry: Optional[InstrumentMasterRegistry] = None,
     ) -> None:
         """
         Initialize adapter with optional fyersModel client and response cache.
@@ -38,6 +40,7 @@ class FyersMarketDataAdapter(MarketDataProvider):
         self._cache = cache
         self._credentials_provider = credentials_provider
         self._socket_factory = socket_factory
+        self._instrument_registry = instrument_registry
         self.last_stream_feed: Optional[Any] = None
 
     # --------------------------------------------------------------------------
@@ -197,16 +200,39 @@ class FyersMarketDataAdapter(MarketDataProvider):
     # --------------------------------------------------------------------------
 
     async def get_instrument(self, symbol: str) -> Optional[Instrument]:
-        """Fetch instrument metadata (delegated to cached instrument master)."""
+        """Return metadata from the loaded authoritative instrument master."""
+        if self._instrument_registry is None:
+            return None
+        contract = self._instrument_registry.get_contract_by_symbol(symbol)
+        if contract is not None:
+            return Instrument(
+                symbol=contract.symbol,
+                instrument_type="OPTIDX",
+                tick_size=contract.tick_size,
+                lot_size=contract.lot_size,
+            )
         return None
 
     async def get_option_chain(self, underlying: str, expiry_date: date) -> List[OptionContract]:
-        """Fetch option chain from FYERS (option chain endpoint)."""
-        return []
+        """Return the verified option chain from the loaded instrument master."""
+        if self._instrument_registry is None:
+            return []
+        return [
+            contract
+            for contract in (
+                self._instrument_registry.get_contract_by_symbol(symbol)
+                for symbol in self._instrument_registry.symbols
+            )
+            if contract is not None
+            and contract.underlying == underlying
+            and contract.expiry_date == expiry_date
+        ]
 
     async def get_available_expiries(self, underlying: str) -> List[date]:
-        """Fetch available expiries."""
-        return []
+        """Return sorted expiries from the loaded instrument master."""
+        if self._instrument_registry is None:
+            return []
+        return self._instrument_registry.get_expiries(underlying)
 
     async def stream_ticks(self, symbols: List[str]) -> AsyncIterator[MarketTick]:
         """Stream genuine exchange-timestamped ticks via the FYERS v3 data WebSocket.

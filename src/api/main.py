@@ -36,8 +36,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     yield
     logger.info("Shutting down MyTradeView Backend API...")
     await workstation_service.stop_live_feed()
-    if workstation_service.paper_broker and hasattr(workstation_service.paper_broker, "disconnect"):
-        await workstation_service.paper_broker.disconnect()
+    broker = workstation_service.broker_client
+    if broker and hasattr(broker, "disconnect"):
+        await broker.disconnect()
 
 
 app = FastAPI(

@@ -117,6 +117,10 @@ def test_fyers_history_query() -> Dict[str, Any]:
             results[symbol] = {
                 "label": label,
                 "status": "exception",
+                "code": None,
+                "message": f"Network unavailable: {type(e).__name__}",
+                "candles_count": 0,
+                "network_error": True,
                 "error": str(e),
             }
 

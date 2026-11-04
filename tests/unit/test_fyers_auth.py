@@ -109,6 +109,18 @@ async def test_token_presence_alone_is_not_authentication(tmp_path):
     assert m.is_authenticated is False  # nothing validated yet
 
 
+async def test_expired_cached_token_reports_expiry(tmp_path):
+    m = make(tmp_path)
+    m.save_token(TOKEN)
+    data = json.loads(m.token_cache_path.read_text())
+    data["issued_at"] = (now_utc() - timedelta(days=2)).isoformat()
+    m.token_cache_path.write_text(json.dumps(data))
+
+    st = await m.validate()
+    assert st["authenticated"] is False
+    assert st["reason"] == "TOKEN_EXPIRED"
+
+
 async def test_rejected_token_fails_closed_and_is_discarded(tmp_path):
     m = make(tmp_path, profile={"s": "error", "code": -16, "message": "Could not authenticate the user"})
     m.save_token(TOKEN)

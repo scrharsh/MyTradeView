@@ -98,6 +98,8 @@ from src.core.models import (
     TradingSession,
 )
 from src.broker.fyers_auth import FyersAuthError, FyersAuthManager
+from src.broker.fyers import FyersBrokerClient
+from src.broker.fyers_order_feed import FyersOrderFeed
 from src.data.candle_builder import TickCandleBuilder
 from src.data.contract_resolver import ContractResolver
 from src.data.fyers_live_feed import FyersLiveFeed
@@ -150,7 +152,13 @@ class WorkstationService:
 
     def __init__(self) -> None:
         self.settings = get_config()
-        self.execution_mode = "paper"
+        requested_mode = os.environ.get("EXECUTION_MODE", "paper").strip().lower()
+        self.execution_mode = requested_mode if requested_mode in {"paper", "live"} else "paper"
+        self._live_execution_requested = (
+            self.execution_mode == "live"
+            and os.environ.get("LIVE_TRADING_ACK", "").strip().lower() == "true"
+            and os.environ.get("LIVE_BROKER_ENABLED", "").strip().lower() == "true"
+        )
         self._db_engine = None
         self._session_factory = None
         self.repo: Optional[StateRepository] = None
@@ -159,6 +167,8 @@ class WorkstationService:
         self.instrument_registry = InstrumentMasterRegistry()
         self.contract_resolver = ContractResolver(self.instrument_registry)
         self.paper_broker = PaperBrokerClient()
+        self.broker_client = self.paper_broker
+        self.order_update_feed: Optional[FyersOrderFeed] = None
 
         # Active session defaults to current calendar trading date in IST
         today = to_ist(now_utc()).date()
@@ -218,6 +228,48 @@ class WorkstationService:
         self.sample_backtests: Dict[str, BacktestRun] = {}
         self.last_reconciliation_report: Optional[ReconciliationReport] = None
         self.is_initialized = False
+
+    def _live_credentials(self) -> Optional[tuple[str, str]]:
+        token = self.fyers_auth.get_access_token()
+        if not token or not self.fyers_auth.client_id or not self.fyers_auth.is_authenticated:
+            return None
+        return (self.fyers_auth.client_id, token)
+
+    async def _configure_execution_backend(self) -> None:
+        """Select the explicitly authorized live backend; never fall back silently."""
+        if self.execution_mode == "live" and not self._live_execution_requested:
+            raise RuntimeError(
+                "LIVE execution requires LIVE_BROKER_ENABLED=true and LIVE_TRADING_ACK=true."
+            )
+        if not self._live_execution_requested:
+            self.execution_mode = "paper"
+            self.broker_client = self.paper_broker
+            return
+
+        status = await self.fyers_auth.validate()
+        if not status["authenticated"]:
+            raise RuntimeError(
+                f"LIVE_BROKER_ENABLED requires a validated FYERS session ({status['reason']})."
+            )
+        client = self.fyers_auth.build_model()
+        self.broker_client = FyersBrokerClient(
+            client=client,
+            config=self.settings.broker,
+            execution_mode=ExecutionMode.LIVE,
+            app_id=self.fyers_auth.client_id,
+            access_token=self.fyers_auth.get_access_token(),
+        )
+        self.execution_mode = "live"
+        self.active_session = self.active_session.model_copy(
+            update={
+                "session_id": self.active_session.session_id.replace("-PAPER", "-LIVE"),
+                "execution_mode": ExecutionMode.LIVE,
+            }
+        )
+        self.risk_engine.session_id = self.active_session.session_id
+        self.oms.session = self.active_session
+        self.oms.broker_client = self.broker_client
+        self.reconciliation_service.broker = self.broker_client
 
     # --------------------------------------------------------------------------
     # FYERS authentication & live feed state
@@ -295,12 +347,6 @@ class WorkstationService:
         self.fyers_auth._set_state(False, "LOGGED_OUT")
         return self.fyers_auth.status()
 
-    def _live_credentials(self) -> Optional[tuple]:
-        token = self.fyers_auth.get_access_token()
-        if not token or not self.fyers_auth.client_id or not self.fyers_auth.is_authenticated:
-            return None
-        return (self.fyers_auth.client_id, token)
-
     async def start_live_feed(self) -> Dict[str, Any]:
         """Start the real FYERS WebSocket pipeline. Requires a *validated* FYERS session."""
         if self.live_pipeline is not None:
@@ -330,12 +376,32 @@ class WorkstationService:
         pipeline = LiveCandlePipeline(feed, builder, on_candle=self._on_live_candle, on_event=self._on_live_event)
         await pipeline.start()
         self.live_pipeline = pipeline
+        if self.execution_mode == "live" and self.order_update_feed is None:
+            from src.websocket.order_updates import OrderUpdateWebSocketService
+
+            order_updates = OrderUpdateWebSocketService(self.oms)
+            loop = asyncio.get_running_loop()
+
+            def dispatch_order_frame(frame: Dict[str, Any]) -> None:
+                asyncio.run_coroutine_threadsafe(
+                    order_updates.process_incoming_frame(frame),
+                    loop,
+                )
+
+            self.order_update_feed = FyersOrderFeed(
+                credentials_provider=self._live_credentials,
+                on_frame=dispatch_order_frame,
+            )
+            await self.order_update_feed.start()
         return self.get_live_feed_status()
 
     async def stop_live_feed(self) -> Dict[str, Any]:
         pipeline, self.live_pipeline = self.live_pipeline, None
         if pipeline is not None:
             await pipeline.stop()
+        if self.order_update_feed is not None:
+            await self.order_update_feed.stop()
+            self.order_update_feed = None
         return self.get_live_feed_status()
 
     async def _on_live_candle(self, candle: Candle) -> None:
@@ -360,11 +426,39 @@ class WorkstationService:
         self.repo = StateRepository(self._db_session)
         self.oms.state_repo = self.repo
 
-        # Connect paper broker
+        await self._configure_execution_backend()
+
+        # Connect the selected broker backend. Live mode remains fail-closed if
+        # authentication or the explicit authorization flags are absent.
         self.paper_broker.set_connection_status(BrokerConnectionStatus.CONNECTED)
+        if self.execution_mode == "live":
+            auth_status = await self.broker_client.check_auth()
+            if not auth_status.is_authenticated:
+                raise RuntimeError("Validated FYERS session could not be established for live execution.")
+            self.last_reconciliation_report = await self.reconciliation_service.reconcile()
+            if not self.last_reconciliation_report.is_synchronized:
+                raise RuntimeError(
+                    "Live startup blocked: broker and local state are not reconciled."
+                )
 
         # 1. Parse Instrument Master
-        csv_data = """trading_symbol,underlying_symbol,strike_price,option_type,expiry_date,minimum_lot_size,tick_size
+        instrument_source = os.environ.get("FYERS_INSTRUMENT_MASTER_PATH")
+        if self.execution_mode == "live":
+            instrument_cache = instrument_source or os.environ.get(
+                "FYERS_INSTRUMENT_MASTER_CACHE_PATH", "./secrets/NSE_FO.csv"
+            )
+            self.instrument_registry = InstrumentMasterRegistry.load_official(
+                cache_path=instrument_cache,
+                url=os.environ.get(
+                    "FYERS_INSTRUMENT_MASTER_URL",
+                    "https://public.fyers.in/sym_details/NSE_FO.csv",
+                ),
+            )
+            self.contract_resolver = ContractResolver(self.instrument_registry)
+        elif instrument_source:
+            self.instrument_registry.parse_csv(Path(instrument_source))
+        else:
+            csv_data = """trading_symbol,underlying_symbol,strike_price,option_type,expiry_date,minimum_lot_size,tick_size
 NSE:NIFTY26NOV25000CE,NSE:NIFTY50-INDEX,25000.0,CE,2026-11-06,25,0.05
 NSE:NIFTY26NOV25000PE,NSE:NIFTY50-INDEX,25000.0,PE,2026-11-06,25,0.05
 NSE:NIFTY26NOV24950CE,NSE:NIFTY50-INDEX,24950.0,CE,2026-11-06,25,0.05
@@ -376,7 +470,7 @@ NSE:NIFTY26NOV25050PE,NSE:NIFTY50-INDEX,25050.0,PE,2026-11-06,25,0.05
 NSE:NIFTY26NOV25100CE,NSE:NIFTY50-INDEX,25100.0,CE,2026-11-06,25,0.05
 NSE:NIFTY26NOV25100PE,NSE:NIFTY50-INDEX,25100.0,PE,2026-11-06,25,0.05
 """
-        self.instrument_registry.parse_csv(csv_data)
+            self.instrument_registry.parse_csv(csv_data)
 
         # 2. Build Synthetic Market Data for 2026-11-06 benchmark testing
         builder = SyntheticMarketDataBuilder(session_date=date(2026, 11, 6))
@@ -505,7 +599,7 @@ NSE:NIFTY26NOV25100PE,NSE:NIFTY50-INDEX,25100.0,PE,2026-11-06,25,0.05
         # If a daily token is already stored, verify it with a real FYERS request (non-blocking).
         if self.fyers_auth.status()["token_present"]:
             self._auth_validation_task = asyncio.create_task(self.fyers_auth.validate())
-        logger.info("WorkstationService initialized in PAPER mode (DB-connected).")
+        logger.info("WorkstationService initialized in %s mode (DB-connected).", self.execution_mode.upper())
 
     async def _seed_demo_order_and_position(self) -> None:
         """Seed a demonstration order and position explicitly tagged as DEMO_FIXTURE."""
@@ -688,10 +782,10 @@ NSE:NIFTY26NOV25100PE,NSE:NIFTY50-INDEX,25100.0,PE,2026-11-06,25,0.05
 
         return SystemHealthResponse(
             status="HEALTHY",
-            execution_mode="paper",
+            execution_mode=self.execution_mode,
             timestamp=now_utc(),
-            broker_connected=self.paper_broker.is_connected,
-            broker_status="CONNECTED" if self.paper_broker.is_connected else "DISCONNECTED",
+            broker_connected=self.broker_client.is_connected,
+            broker_status="CONNECTED" if self.broker_client.is_connected else "DISCONNECTED",
             fyers_authenticated=fyers_authenticated,
             fyers_status=fyers_status,
             market_data_feed_connected=feed_connected,
@@ -1396,7 +1490,7 @@ NSE:NIFTY26NOV25100PE,NSE:NIFTY50-INDEX,25100.0,PE,2026-11-06,25,0.05
         return SessionActiveResponse(
             session_id=self.active_session.session_id,
             trading_date=self.active_session.trading_date,
-            execution_mode="paper",
+            execution_mode=self.execution_mode,
             phase=self.active_session.phase.value,
             is_active=self.active_session.is_active,
             started_at=self.active_session.started_at,
@@ -1411,7 +1505,7 @@ NSE:NIFTY26NOV25100PE,NSE:NIFTY50-INDEX,25100.0,PE,2026-11-06,25,0.05
     def start_session(self, trading_date: Optional[date] = None) -> SessionActiveResponse:
         """Start or restart the paper trading session."""
         sess_date = trading_date or to_ist(now_utc()).date()
-        sess_id = f"SESSION-{sess_date.strftime('%Y%m%d')}-PAPER"
+        sess_id = f"SESSION-{sess_date.strftime('%Y%m%d')}-{self.execution_mode.upper()}"
         self.active_session = self.active_session.model_copy(
             update={
                 "session_id": sess_id,
@@ -1471,7 +1565,7 @@ NSE:NIFTY26NOV25100PE,NSE:NIFTY50-INDEX,25100.0,PE,2026-11-06,25,0.05
             "backend_status": "HEALTHY",
             "fyers_authenticated": fyers_authenticated,
             "fyers_status": fyers_status,
-            "broker_status": "CONNECTED" if self.paper_broker.is_connected else "DISCONNECTED",
+            "broker_status": "CONNECTED" if self.broker_client.is_connected else "DISCONNECTED",
             "feed_connected": feed_connected,
             "feed_status": feed_status,
             "data_source": data_source,
@@ -1491,7 +1585,7 @@ NSE:NIFTY26NOV25100PE,NSE:NIFTY50-INDEX,25100.0,PE,2026-11-06,25,0.05
             "fyers_auth_reason": self.fyers_auth.status()["reason"],
             "live_feed": self.get_live_feed_status(),
             "anomalies": dict(self.candle_anomaly_stats),
-            "execution_mode": "paper",
+            "execution_mode": self.execution_mode,
         }
 
     async def process_live_candle(self, candle: Candle, source: str = "REPLAY") -> List[OmsOrder]:
@@ -1585,9 +1679,12 @@ NSE:NIFTY26NOV25100PE,NSE:NIFTY50-INDEX,25100.0,PE,2026-11-06,25,0.05
                 opt_type = OptionType.CE if sig.signal_type == SignalType.ENTER_LONG_CE else OptionType.PE
                 try:
                     contract = self.contract_resolver.resolve_atm_contract(
-                        underlying_price=sig.underlying_price,
+                        underlying=self.active_strategy_config.underlying_symbol
+                        if self.active_strategy_config
+                        else "NSE:NIFTY50-INDEX",
+                        spot_price=sig.underlying_price,
                         option_type=opt_type,
-                        target_date=to_ist(timestamp).date(),
+                        session_date=to_ist(timestamp).date(),
                     )
                 except Exception as e:
                     logger.error(f"[WorkstationService] Contract resolution failed for {sig}: {e}")

@@ -12,6 +12,8 @@ eggs/
 .eggs/
 lib/
 lib64/
+!frontend/src/lib/
+!frontend/src/lib/*.ts
 parts/
 sdist/
 var/
@@ -67,4 +69,3 @@ logs/
 .pytest_cache/
 .coverage
 htmlcov/
-

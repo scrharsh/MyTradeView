@@ -1,11 +1,14 @@
 """Authoritative Instrument Master parser and registry for FYERS derivatives."""
 
 import csv
+import hashlib
 import io
+import os
 from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
+from urllib.request import Request, urlopen
 import pandas as pd
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -43,11 +46,28 @@ class InstrumentMasterRegistry:
         # Key: underlying -> sorted list of dates
         self._expiries_by_underlying: Dict[str, List[date]] = {}
         self._last_report: Optional[InstrumentMasterReport] = None
+        self._source_sha256: Optional[str] = None
+        self._source_url: Optional[str] = None
+        self._source_loaded_at: Optional[datetime] = None
 
     @property
     def is_loaded(self) -> bool:
         """Check if registry contains loaded instruments."""
         return len(self._options) > 0 or len(self._instruments) > 0
+
+    @property
+    def symbols(self) -> List[str]:
+        """Return all registered option symbols in deterministic order."""
+        return sorted(self._options)
+
+    @property
+    def source_metadata(self) -> Dict[str, Optional[str]]:
+        """Return non-sensitive provenance for the loaded symbol master."""
+        return {
+            "url": self._source_url,
+            "sha256": self._source_sha256,
+            "loaded_at": self._source_loaded_at.isoformat() if self._source_loaded_at else None,
+        }
 
     def parse_csv(self, file_path_or_content: str | Path) -> InstrumentMasterReport:
         """
@@ -81,7 +101,10 @@ class InstrumentMasterRegistry:
 
         # Check if first row is a header
         has_header = False
-        lower_row = [c.strip().lower() for c in first_row]
+        lower_row = [
+            c.strip().lower().replace(" ", "_").replace("-", "_")
+            for c in first_row
+        ]
         if any(h in lower_row for h in ["symbol", "trading_symbol", "tradingsymbol", "fytoken"]):
             has_header = True
             header_map = {col: idx for idx, col in enumerate(lower_row)}
@@ -99,13 +122,21 @@ class InstrumentMasterRegistry:
 
             try:
                 if has_header:
-                    sym = row[header_map.get("trading_symbol", header_map.get("symbol", 0))].strip()
-                    underlying = row[header_map.get("underlying_symbol", header_map.get("underlying", 1))].strip()
-                    strike_str = row[header_map.get("strike_price", header_map.get("strike", 2))].strip()
-                    opt_type_str = row[header_map.get("option_type", 3)].strip().upper()
-                    expiry_str = row[header_map.get("expiry_date", header_map.get("expiry", 4))].strip()
-                    lot_size_str = row[header_map.get("minimum_lot_size", header_map.get("lot_size", 5))].strip()
-                    tick_size_str = row[header_map.get("tick_size", 6)].strip() if "tick_size" in header_map else "0.05"
+                    def column(*names: str, default: Optional[int] = None) -> str:
+                        for name in names:
+                            if name in header_map:
+                                return row[header_map[name]].strip()
+                        if default is None:
+                            raise DataValidationError(f"Missing required symbol-master column: {names[0]}")
+                        return row[default].strip()
+
+                    sym = column("trading_symbol", "symbol", default=0)
+                    underlying = column("underlying_symbol", "underlying", default=1)
+                    strike_str = column("strike_price", "strike", default=2)
+                    opt_type_str = column("option_type", default=3).upper()
+                    expiry_str = column("expiry_date", "expiry", default=4)
+                    lot_size_str = column("minimum_lot_size", "lot_size", default=5)
+                    tick_size_str = column("tick_size", default=6) if "tick_size" in header_map else "0.05"
                 else:
                     # FYERS official 15-column NSE_FO.csv format:
                     # 0: fy_token, 1: symbol_details, 2: inst_type, 3: lot_size, 4: tick_size,
@@ -191,6 +222,64 @@ class InstrumentMasterRegistry:
         )
         self._last_report = report
         return report
+
+    @classmethod
+    def load_official(
+        cls,
+        cache_path: str | Path,
+        url: str = "https://public.fyers.in/sym_details/NSE_FO.csv",
+        max_age_hours: float = 24.0,
+        timeout_seconds: float = 20.0,
+    ) -> "InstrumentMasterRegistry":
+        """Download and validate the official FYERS NSE derivatives master.
+
+        A cached file is accepted only while fresh. Downloads are validated in a
+        temporary registry before replacing the cache, so malformed or partial
+        responses cannot become authoritative state.
+        """
+        cache = Path(cache_path)
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        content: Optional[str] = None
+        if cache.exists():
+            age_seconds = datetime.now(timezone.utc).timestamp() - cache.stat().st_mtime
+            if age_seconds <= max_age_hours * 3600:
+                content = cache.read_text(encoding="utf-8", errors="ignore")
+
+        if content is None:
+            request = Request(url, headers={"User-Agent": "MyTradeView/1.0"})
+            try:
+                with urlopen(request, timeout=timeout_seconds) as response:
+                    raw = response.read()
+            except Exception as exc:
+                raise DataValidationError(
+                    f"Official FYERS instrument master unavailable: {type(exc).__name__}"
+                ) from exc
+            if not raw:
+                raise DataValidationError("Official FYERS instrument master returned an empty response.")
+            content = raw.decode("utf-8-sig", errors="strict")
+
+        candidate = cls()
+        report = candidate.parse_csv(content)
+        if report.valid_options == 0:
+            raise DataValidationError("Official FYERS instrument master contains no valid option contracts.")
+        if report.malformed_records > max(10, report.total_records // 10):
+            raise DataValidationError(
+                "Official FYERS instrument master failed validation: too many malformed records."
+            )
+
+        if not cache.exists() or content != cache.read_text(encoding="utf-8", errors="ignore"):
+            temp_path = cache.with_suffix(cache.suffix + ".tmp")
+            temp_path.write_text(content, encoding="utf-8")
+            try:
+                os.chmod(temp_path, 0o600)
+            except OSError:
+                pass
+            os.replace(temp_path, cache)
+
+        candidate._source_sha256 = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        candidate._source_url = url
+        candidate._source_loaded_at = datetime.now(timezone.utc)
+        return candidate
 
     def register_option_contract(self, contract: OptionContract) -> None:
         """Register a validated OptionContract directly into the authoritative registry."""

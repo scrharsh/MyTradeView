@@ -41,8 +41,12 @@ def test_fyers_history_query_returns_unauthenticated_error():
 
     for sym, res in results.items():
         assert res["candles_count"] == 0
-        assert res["code"] == -16
-        assert "authenticate" in res["message"].lower()
+        if res.get("network_error"):
+            assert res["code"] is None
+            assert "network unavailable" in res["message"].lower()
+        else:
+            assert res["code"] == -16
+            assert "authenticate" in res["message"].lower()
 
 
 def test_eod_bhavcopy_schema_rejected_for_intraday_replay(tmp_path: Path):

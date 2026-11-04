@@ -69,6 +69,53 @@ def test_parse_instrument_master_positional_format(sample_positional_fyers_csv: 
     assert contract.strike == Decimal("24500.0")
 
 
+def test_parse_official_header_aliases():
+    registry = InstrumentMasterRegistry()
+    report = registry.parse_csv(
+        "Fytoken,Symbol Details,Exchange Instrument Type,Minimum Lot Size,Tick Size,"
+        "Trading Symbol,Expiry Date,Strike Price,Option Type,Underlying Symbol\n"
+        "1,NIFTY CALL,14,25,0.05,NSE:NIFTY26N0524500CE,2026-11-05,24500,CE,NSE:NIFTY50-INDEX\n"
+    )
+    assert report.valid_options == 1
+    assert registry.get_contract_by_symbol("NSE:NIFTY26N0524500CE") is not None
+
+
+def test_load_official_master_validates_and_caches(monkeypatch, tmp_path, sample_positional_fyers_csv):
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+        def read(self):
+            return sample_positional_fyers_csv.encode()
+
+    monkeypatch.setattr("src.data.instrument_master.urlopen", lambda *args, **kwargs: Response())
+    cache = tmp_path / "NSE_FO.csv"
+    registry = InstrumentMasterRegistry.load_official(cache_path=cache, url="https://example.test/NSE_FO.csv")
+
+    assert cache.exists()
+    assert registry.source_metadata["url"] == "https://example.test/NSE_FO.csv"
+    assert registry.get_contract_by_symbol("NSE:NIFTY26N0524500CE") is not None
+
+
+def test_load_official_rejects_malformed_master(monkeypatch, tmp_path):
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+        def read(self):
+            return b"symbol,underlying,strike,option_type,expiry,lot_size\nbroken"
+
+    monkeypatch.setattr("src.data.instrument_master.urlopen", lambda *args, **kwargs: Response())
+    with pytest.raises(DataValidationError, match="no valid option"):
+        InstrumentMasterRegistry.load_official(cache_path=tmp_path / "NSE_FO.csv")
+
+
 def test_atm_strike_calculation():
     """Verify ATM strike rounding to nearest 50 points."""
     registry = InstrumentMasterRegistry()
