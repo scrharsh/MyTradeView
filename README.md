@@ -1,97 +1,21 @@
-# MyTradeView: Automated NIFTY ORB Trading Executor
+# MyTradeView — Automated NIFTY ORB Live Trading Workstation
 
-`MyTradeView` is an institutional-grade, event-driven automated trading platform built in Python 3.10+ for personal quantitative trading on the National Stock Exchange of India (NSE) using the **FYERS API v3**.
+MyTradeView is a **live automated algorithmic trading workstation** built in Python 3.10+ for executing intraday NIFTY options strategies through the user's own **FYERS brokerage account using FYERS API v3**.
 
-It faithfully implements a validated **NIFTY Opening Range Breakout (ORB)** intraday options strategy originally modeled on **StockMock**.
+The platform is designed to operate as a real trading system, connecting directly to live NSE market data and the FYERS broker infrastructure to identify trading opportunities, manage positions, execute orders, and monitor portfolio-level risk in real time.
 
----
+Its primary objective is to automate the execution of a defined **NIFTY Opening Range Breakout (ORB) strategy**, based on the strategy logic modeled on StockMock, while maintaining strict execution discipline, broker-state synchronization, and automated risk protection.
 
-## Key Features
+MyTradeView is engineered around actual brokerage execution rather than simulated trading. Historical replay, backtesting, and paper execution are supporting capabilities used for strategy validation, development, and system verification.
 
-- **Strict Strategy Fidelity:** Faithful implementation of the StockMock NIFTY ORB strategy (09:16 - 09:45 IST range, Monday/Thursday/Friday sessions, ATM strike selection, 1 lot, intraday).
-- **Dual Risk Safeguards:**
-  - Hard daily loss threshold: **-₹3,000** kill switch (emergency square-off and session lockout).
-  - Profit protection trigger: **+₹3,000** MTM activates minimum locked floor of **+₹500** with configurable trailing logic.
-- **Atomic Reversal Sequencing:** Guaranteed exit of existing option position before opening reverse position. Zero naked double exposure.
-- **Three Execution Modes:**
-  - `simulation`: Historical discrete event replay using 1-minute historical data.
-  - `paper`: Real-time market feed via FYERS WebSockets with simulated order fills and slippage modeling.
-  - `live`: Direct broker execution via FYERS API v3 (Hard-disabled by default, requires explicit confirmation).
-- **Crash Recovery & Reconciliation:** State persisted in PostgreSQL (production) or SQLite (testing). Background reconciliation worker synchronizes local OMS with FYERS broker state every 5 seconds.
+**Primary operating objective:** Real-money intraday trading through the user's own FYERS account, with automated order execution, position management, reversal sequencing, and capital protection.
 
----
+### Execution Architecture
 
-## Architecture Overview
+MyTradeView is designed as a live-first trading system with supporting validation environments.
 
-Detailed architectural design is documented in [ARCHITECTURE.md](ARCHITECTURE.md).
+- **Live Execution (Primary):** Connects to FYERS API v3 for real-time market data, order placement, modification, cancellation, position tracking, and broker reconciliation. Trades are executed through the user's own authorized FYERS brokerage account.
+- **Historical Simulation (Validation):** Replays historical market data to validate strategy behavior, execution sequencing, and risk-management logic.
+- **Paper Execution (Testing):** Uses live market data with simulated order execution to verify system behavior without placing real orders.
 
-```
-MyTradeView/
-├── ARCHITECTURE.md          # Comprehensive 12-module system architecture
-├── IMPLEMENTATION_PLAN.md   # 10-phase implementation roadmap & milestones
-├── CONFIGURATION.md         # Validated configuration reference & environment variables
-├── RISK_CONTROLS.md         # Multi-tiered risk controls & kill switch specifications
-├── pyproject.toml           # Modern Python packaging configuration
-├── requirements.txt         # Dependencies list
-├── .env.example             # Template for local environment configuration
-├── config/                  # Pydantic v2 Settings and configuration schemas
-├── src/
-│   ├── common/              # Enums, exceptions, logging, IST time utilities
-│   ├── core/                # Domain models (Ticks, Candles, Orders, Positions)
-│   ├── strategy/            # Opening Range Breakout & Reversal engine
-│   ├── data/                # Market data providers & Option symbol resolver
-│   ├── backtest/            # Backtesting engine & StockMock parity validation
-│   ├── risk/                # Pre-trade risk, MTM tracker, kill switch
-│   ├── broker/              # FYERS API v3 REST & WebSocket adapter
-│   ├── oms/                 # Order management system & reconciliation worker
-│   ├── storage/             # PostgreSQL / SQLite async persistence layer
-│   ├── scheduler/           # Market session scheduler (09:16 - 15:10 IST)
-│   └── monitoring/          # Alerts (Telegram/Slack) & health checks
-└── tests/
-    ├── unit/                # Unit test suite (Strategy, Risk, OMS, Resolver)
-    └── integration/         # Integration test suite (DB, Broker Adapter, Replay)
-```
-
----
-
-## Quick Start (Simulation / Local Testing)
-
-### 1. Prerequisites
-- Python 3.10+
-- PostgreSQL 14+ (or local SQLite for development)
-- Git
-
-### 2. Installation
-```bash
-# Clone the repository
-git clone <repo-url> MyTradeView
-cd MyTradeView
-
-# Create and activate virtual environment
-python -m venv venv
-.\venv\Scripts\Activate.ps1  # Windows PowerShell
-# source venv/bin/activate    # Linux / macOS
-
-# Install dependencies
-pip install -r requirements.txt
-```
-
-### 3. Configuration
-```bash
-# Copy template configuration
-cp .env.example .env
-
-# Edit .env with your FYERS credentials and preferred database URL
-```
-
-### 4. Running Tests
-```bash
-pytest -v
-```
-
----
-
-## Safety & Disclaimer
-
-This software executes financial transactions in derivative markets carrying substantial risk of financial loss. Live mode (`EXECUTION_MODE=live`) must never be engaged without completing backtesting, paper trading, and verifying pre-trade risk controls.
-
+Live execution requires valid FYERS authentication, explicit authorization, and operational risk checks.
