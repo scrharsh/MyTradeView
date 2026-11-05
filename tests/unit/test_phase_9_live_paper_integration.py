@@ -121,8 +121,9 @@ def test_credential_redaction():
     assert redact("FYERS_SECRET_KEY_12345") == "FYE...345"
 
 
-def test_fyers_unauthenticated_fail_closed():
+def test_fyers_unauthenticated_fail_closed(monkeypatch, tmp_path):
     """Verify unauthenticated FYERS check fails closed gracefully."""
+    monkeypatch.setattr("scripts.test_live_market_data_connection.ROOT_DIR", tmp_path)
     with patch.dict(os.environ, {}, clear=True):
         res = run_fyers_live_connection_check()
         assert res["status"] in {"UNAUTHENTICATED", "AUTH_FAILED"}

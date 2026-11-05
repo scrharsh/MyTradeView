@@ -18,8 +18,10 @@ import argparse
 import asyncio
 import os
 import sys
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+from typing import List
 
 import dotenv
 
@@ -50,6 +52,40 @@ def market_open_now() -> bool:
     return n.weekday() < 5 and (n.hour, n.minute) >= (9, 15) and (n.hour, n.minute) < (15, 30)
 
 
+@dataclass
+class LiveTickMetrics:
+    """Facts observed after feed validation and candle-builder processing."""
+
+    raw_ticks_received: int = 0
+    exchange_timestamps_valid: int = 0
+    ticks_accepted_by_builder: int = 0
+    candles_finalized: int = 0
+    candles: List[object] = field(default_factory=list)
+
+
+def consume_tick(builder: TickCandleBuilder, tick: object, metrics: LiveTickMetrics) -> List[object]:
+    """Record a validated feed tick and preserve the builder as the acceptance authority."""
+    metrics.raw_ticks_received += 1
+    metrics.exchange_timestamps_valid += 1
+    before = builder.stats["ticks_accepted"]
+    finalized = builder.on_tick(tick)  # type: ignore[arg-type]
+    metrics.ticks_accepted_by_builder += builder.stats["ticks_accepted"] - before
+    metrics.candles_finalized += len(finalized)
+    metrics.candles.extend(finalized)
+    return finalized
+
+
+def live_ticks_status(metrics: LiveTickMetrics, market_open: bool) -> str:
+    """Return a truthful live-tick result; raw receipt alone can never pass."""
+    if metrics.ticks_accepted_by_builder > 0:
+        return "PASS"
+    if metrics.raw_ticks_received > 0 and not market_open:
+        return "OUTSIDE_SESSION"
+    if not market_open:
+        return "BLOCKED"
+    return "FAIL"
+
+
 async def main(seconds: int, test_reconnect: bool) -> int:
     auth = FyersAuthManager()
     print(f"[{stamp()}] Market open now: {market_open_now()}  | symbol: {SYMBOL}")
@@ -73,7 +109,7 @@ async def main(seconds: int, test_reconnect: bool) -> int:
 
     feed = FyersLiveFeed(symbol=SYMBOL, credentials_provider=creds)
     builder = TickCandleBuilder(SYMBOL)
-    candles = []
+    metrics = LiveTickMetrics()
     first_ticks = []
     await feed.start()
 
@@ -82,7 +118,7 @@ async def main(seconds: int, test_reconnect: bool) -> int:
             if ev.kind == "tick" and ev.tick is not None:
                 if len(first_ticks) < 3:
                     first_ticks.append(ev.tick)
-                candles.extend(builder.on_tick(ev.tick))
+                consume_tick(builder, ev.tick, metrics)
             elif ev.kind in ("disconnect", "stale", "auth_failed"):
                 builder.discard_partial()
 
@@ -103,36 +139,55 @@ async def main(seconds: int, test_reconnect: bool) -> int:
                     if feed.reconnect_count > before and feed.is_live:
                         break
                 ok = feed.reconnect_count > before and feed.ws_connected
-                report("7_RECONNECT", "PASS" if (ok and feed.is_live) else ("FAIL" if not ok else "FAIL"),
+                report("10_RECONNECT", "PASS" if (ok and feed.is_live) else ("FAIL" if not ok else "FAIL"),
                        f"reconnect_count={feed.reconnect_count}, ws_connected={feed.ws_connected}, "
                        f"subscribed={feed.subscribed}, fresh_ticks={feed.tick_fresh}")
         snap = feed.snapshot()
 
-        report("2_WEBSOCKET", "PASS" if (feed.last_connect_at is not None) else "FAIL",
-               f"state={snap['state']}, connected_at={to_ist(feed.last_connect_at).strftime('%H:%M:%S') if feed.last_connect_at else None}")
-        report("3_SUBSCRIPTION", "PASS" if feed.subscribed or snap["stats"]["ticks_received"] else "FAIL",
-               f"subscribed={feed.subscribed}")
-        n = snap["stats"]["ticks_received"]
+        report("2_WEBSOCKET", "PASS" if feed.ws_connected else "FAIL",
+               f"state={snap['state']}, ws_connected={feed.ws_connected}, "
+               f"connected_at={to_ist(feed.last_connect_at).strftime('%H:%M:%S') if feed.last_connect_at else None}")
+        report("3_SUBSCRIPTION", "PASS" if feed.subscribed else "FAIL",
+               f"acknowledged={feed.subscribed}; a received tick is not treated as an acknowledgement")
+        n = snap["stats"]["raw_ticks_received"]
+        if n > 0:
+            report("4_RAW_TICKS", "PASS", f"raw_ticks_received={n}")
+        else:
+            report("4_RAW_TICKS", "BLOCKED" if not market_open_now() else "FAIL",
+                   "No raw ticks received; market is closed or the feed is not delivering data.")
+        valid_ts = snap["stats"]["exchange_timestamps_valid"]
+        report("5_EXCHANGE_TIMESTAMPS", "PASS" if valid_ts > 0 else "NOT TESTED",
+               f"valid_exchange_timestamps={valid_ts}; rejected="
+               f"{snap['stats']['ticks_rejected_no_timestamp'] + snap['stats']['ticks_rejected_future_timestamp']}")
+        builder_status = live_ticks_status(metrics, market_open_now())
+        report("6_BUILDER_TICKS", builder_status,
+               f"ticks_accepted_by_candle_builder={metrics.ticks_accepted_by_builder}; "
+               f"outside_session={builder.stats['outside_session_ticks']}; "
+               f"rejected_wrong_symbol={builder.stats['wrong_symbol_ticks']}; "
+               f"rejected_duplicate={builder.stats['duplicate_ticks']}; "
+               f"rejected_out_of_order={builder.stats['out_of_order_ticks']}")
         if n > 0:
             t = first_ticks[0]
-            report("4_LIVE_TICKS", "PASS",
-                   f"{n} ticks; first exchange_ts={to_ist(t.timestamp).strftime('%Y-%m-%d %H:%M:%S IST')}, ltp={t.ltp}; "
+            report("7_LIVE_TICKS", builder_status,
+                   f"raw_ticks={metrics.raw_ticks_received}, exchange_timestamps_valid={metrics.exchange_timestamps_valid}, "
+                   f"builder_accepted={metrics.ticks_accepted_by_builder}, outside_session={builder.stats['outside_session_ticks']}; "
+                   f"first exchange_ts={to_ist(t.timestamp).strftime('%Y-%m-%d %H:%M:%S IST')}, ltp={t.ltp}; "
                    f"last_exchange_ts={to_ist(feed.last_exchange_time).strftime('%H:%M:%S IST')}")
         else:
             why = "market closed (no ticks expected)" if not market_open_now() else "no ticks within window"
-            report("4_LIVE_TICKS", "BLOCKED" if not market_open_now() else "FAIL",
-                   f"0 ticks received: {why}. Authentication/subscription success is NOT live-tick evidence.")
-        if candles:
-            c = candles[0]
-            report("5_CANDLES", "PASS",
-                   f"{len(candles)} finalized 1m candle(s); first {to_ist(c.timestamp).strftime('%H:%M IST')} "
+            report("7_LIVE_TICKS", builder_status,
+                   f"0 raw ticks received: {why}. Authentication/subscription success is NOT live-tick evidence.")
+        if metrics.candles:
+            c = metrics.candles[0]
+            report("8_CANDLES", "PASS",
+                   f"{len(metrics.candles)} finalized 1m candle(s); first {to_ist(c.timestamp).strftime('%H:%M IST')} "
                    f"O={c.open} H={c.high} L={c.low} C={c.close}")
         else:
-            report("5_CANDLES", "NOT TESTED", "No candle finalized (need >=1 full minute of live ticks).")
-        report("6_ANOMALIES", "PASS" if n > 0 else "NOT TESTED",
+            report("8_CANDLES", "NOT TESTED", "No candle finalized (need >=1 full minute of accepted in-session ticks).")
+        report("9_ANOMALIES", "PASS" if n > 0 else "NOT TESTED",
                f"builder={builder.stats}; feed={snap['stats']}" if n > 0 else "No live data to evaluate.")
         if not test_reconnect:
-            report("7_RECONNECT", "NOT TESTED", "Re-run with --test-reconnect during market hours.")
+            report("10_RECONNECT", "NOT TESTED", "Re-run with --test-reconnect during market hours.")
     finally:
         await feed.stop()
         task.cancel()

@@ -18,8 +18,9 @@ from src.common.exceptions import DataValidationError
 from src.data.validator import OfflineDatasetValidator
 
 
-def test_fyers_credentials_missing_by_default(monkeypatch):
+def test_fyers_credentials_missing_by_default(monkeypatch, tmp_path):
     """Verify local configuration safely detects absence of FYERS credentials."""
+    monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("FYERS_APP_ID", raising=False)
     monkeypatch.delenv("FYERS_ACCESS_TOKEN", raising=False)
 
@@ -29,8 +30,9 @@ def test_fyers_credentials_missing_by_default(monkeypatch):
     assert creds["access_token"] is None
 
 
-def test_fyers_history_query_returns_unauthenticated_error():
+def test_fyers_history_query_returns_unauthenticated_error(monkeypatch, tmp_path):
     """Verify unauthenticated call to FYERS API returns code -16 without raising exceptions."""
+    monkeypatch.chdir(tmp_path)
     outcome = run_fyers_history_query()
     assert outcome["creds"]["has_credentials"] is False
 

@@ -44,6 +44,11 @@ async def main() -> int:
     ap.add_argument("--status", action="store_true", help="Validate the stored token via get_profile().")
     ap.add_argument("--logout", action="store_true", help="Delete the stored token.")
     ap.add_argument("--no-browser", action="store_true", help="Print the login URL instead of opening a browser.")
+    ap.add_argument(
+        "--visible-input",
+        action="store_true",
+        help="Show the pasted callback while entering it (useful in terminals where hidden paste fails).",
+    )
     args = ap.parse_args()
 
     auth = FyersAuthManager()
@@ -83,7 +88,11 @@ async def main() -> int:
         "        Copy the FULL redirected callback URL from the browser address bar.\n"
         "        Do not paste the original generate-authcode URL."
     )
-    pasted = getpass.getpass("\nPaste redirected URL or auth_code (input hidden): ").strip()
+    if args.visible_input:
+        print("\nWARNING: The callback URL/auth code will be visible while you paste it.")
+        pasted = input("Paste redirected URL or auth_code: ").strip()
+    else:
+        pasted = getpass.getpass("\nPaste redirected URL or auth_code (input hidden): ").strip()
     if not pasted:
         print("Nothing pasted; aborted.")
         return 1

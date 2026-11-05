@@ -5,7 +5,7 @@ asyncio-friendly event stream. Tracks four *separate* facts and never infers one
 from another:
 
 - ``ws_connected``  : socket opened and not since closed/errored
-- ``subscribed``    : FYERS acknowledged the subscription (or a tick for the symbol arrived)
+- ``subscribed``    : FYERS acknowledged the subscription
 - ``tick_fresh``    : a valid exchange-timestamped tick was received within the stale window
 - ``is_live``       : all of the above
 
@@ -106,6 +106,8 @@ class FyersLiveFeed:
         self._reconnect_attempts = 0
         self._stale_reported = False
         self.stats: Dict[str, int] = {
+            "raw_ticks_received": 0,
+            "exchange_timestamps_valid": 0,
             "ticks_received": 0,
             "ticks_rejected_no_timestamp": 0,
             "ticks_rejected_bad_price": 0,
@@ -298,6 +300,7 @@ class FyersLiveFeed:
         if m.get("symbol") != self.symbol:
             self.stats["ticks_ignored_other_symbol"] += 1
             return
+        self.stats["raw_ticks_received"] += 1
         try:
             ltp = Decimal(str(m["ltp"]))
             if ltp <= 0:
@@ -318,13 +321,13 @@ class FyersLiveFeed:
         if ex_ts - arrival > self._max_future_skew:
             self.stats["ticks_rejected_future_timestamp"] += 1
             return
+        self.stats["exchange_timestamps_valid"] += 1
         try:
             volume = int(m.get("vol_traded_today") or 0)
         except Exception:
             volume = 0
         tick = MarketTick(symbol=self.symbol, ltp=ltp, volume=max(volume, 0), timestamp=ex_ts)
         with self._lock:
-            self.subscribed = True  # a valid tick for the symbol proves the subscription
             self.last_tick_received_at = arrival
             self.last_exchange_time = ex_ts
             self.last_ltp = ltp

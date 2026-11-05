@@ -128,6 +128,7 @@ async def test_stale_feed_detected_and_event_emitted():
     await feed.start()
     s = FakeSocket.instances[0]
     try:
+        s.on_message({"type": "sub", "code": 200, "s": "ok", "message": "Subscribed successfully"})
         s.on_message(tick_msg(clock))
         assert feed.is_live
         clock.advance(31)
@@ -148,6 +149,7 @@ async def test_disconnect_then_automatic_reconnect_and_resubscribe():
     await feed.start()
     first = FakeSocket.instances[0]
     try:
+        first.on_message({"type": "sub", "code": 200, "s": "ok", "message": "Subscribed successfully"})
         first.on_message(tick_msg(clock))
         assert feed.is_live
         first.on_close()
@@ -162,6 +164,7 @@ async def test_disconnect_then_automatic_reconnect_and_resubscribe():
         assert feed.reconnect_count >= 1 and feed.ws_connected is True
         assert feed.is_live is False  # connected, but no fresh post-reconnect... until a new tick
         clock.advance(1)
+        second.on_message({"type": "sub", "code": 200, "s": "ok", "message": "Subscribed successfully"})
         second.on_message(tick_msg(clock))
         assert feed.is_live is True
     finally:
