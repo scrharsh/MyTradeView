@@ -77,9 +77,11 @@ async def main() -> int:
     else:
         print("Opened the FYERS login page in your browser.")
     print(
-        f"\nStep 2: After login, FYERS redirects to {auth.redirect_uri}?...auth_code=...\n"
+        f"\nStep 2: Complete the FYERS login and 2FA screens in the browser.\n"
+        f"        Only after success, FYERS redirects to {auth.redirect_uri}?auth_code=...\n"
         "        The page may show 'cannot be reached' - that is expected.\n"
-        "        Copy the FULL URL from the browser address bar."
+        "        Copy the FULL redirected callback URL from the browser address bar.\n"
+        "        Do not paste the original generate-authcode URL."
     )
     pasted = getpass.getpass("\nPaste redirected URL or auth_code (input hidden): ").strip()
     if not pasted:
@@ -106,4 +108,3 @@ async def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(asyncio.run(main()))
-

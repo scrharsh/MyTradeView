@@ -207,11 +207,19 @@ class FyersAuthManager:
         value = (value or "").strip()
         if not value:
             raise FyersAuthError("No authorization code supplied.")
+        if "generate-authcode" in value:
+            raise FyersAuthError(
+                "The initial FYERS login URL was supplied. Complete login and 2FA first, "
+                "then provide the redirected callback URL containing auth_code."
+            )
         if "auth_code=" in value or value.startswith("http"):
             qs = parse_qs(urlparse(value).query)
-            code = (qs.get("auth_code") or [None])[0]
+            code = (qs.get("auth_code") or qs.get("code") or [None])[0]
             if not code:
-                raise FyersAuthError("Redirect URL does not contain an auth_code parameter.")
+                error = (qs.get("error") or qs.get("error_description") or [None])[0]
+                if error:
+                    raise FyersAuthError(f"FYERS authorization was not completed: {error}")
+                raise FyersAuthError("Redirect URL does not contain an authorization code.")
             state = (qs.get("state") or [None])[0]
             if state is not None and self._pending_state is not None and state != self._pending_state:
                 raise FyersAuthError("OAuth state mismatch; restart login from the application.")

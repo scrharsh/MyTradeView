@@ -82,6 +82,21 @@ def test_parse_auth_code_from_redirect_url_and_state_check(tmp_path):
     assert m.parse_auth_code(CODE) == CODE
 
 
+def test_initial_login_url_is_not_accepted_as_callback(tmp_path):
+    m = make(tmp_path)
+    login_url = m.get_login_url()
+    with pytest.raises(FyersAuthError, match="initial FYERS login URL"):
+        m.parse_auth_code(login_url)
+
+
+def test_callback_code_alias_is_accepted(tmp_path):
+    m = make(tmp_path)
+    m.get_login_url()
+    assert m.parse_auth_code(
+        f"https://127.0.0.1:5000/login?code={CODE}&state={m._pending_state}"
+    ) == CODE
+
+
 async def test_exchange_stores_token_then_validates_with_real_request(tmp_path):
     m = make(tmp_path)
     st = await m.exchange_auth_code(CODE)
