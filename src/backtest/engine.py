@@ -71,7 +71,7 @@ class DiscreteEventBacktestEngine:
         if strategy_config is None:
             self.strategy_config = StrategyConfig(
                 breakout_confirmation_mode=BreakoutConfirmationMode.CANDLE_CLOSE,
-                range_boundary_mode=RangeBoundaryMode.UP_TO_0944_CLOSE,
+                range_boundary_mode=RangeBoundaryMode.UP_TO_0945_CLOSE,
                 order_execution_style=OrderExecutionStyle.MARKET,
                 expiry_day_selection=ExpiryDaySelectionMode.CURRENT_WEEKLY_0DTE,
             )
@@ -215,71 +215,90 @@ class DiscreteEventBacktestEngine:
 
                         for fill in fills:
                             risk_engine.on_fill(fill)
-                            replacement_signals = strategy.on_order_fill(fill)
 
-                            if order_req.side == OrderSide.BUY:
-                                # Opened long position
-                                active_trade = {
-                                    "trade_id": f"TRD_{fill.client_order_id[:10]}",
-                                    "symbol": fill.symbol,
-                                    "contract": contract,
-                                    "entry_time": fill.timestamp,
-                                    "entry_price": fill.fill_price,
-                                    "qty": fill.fill_qty,
-                                    "lot_size": contract.lot_size if contract else 25,
-                                    "option_type": contract.option_type if contract else OptionType.CE,
-                                    "strike": contract.strike if contract else Decimal("0"),
-                                }
-                            else:
-                                # Closed position -> Record completed trade
-                                if active_trade:
-                                    gross_pnl = (fill.fill_price - active_trade["entry_price"]) * Decimal(fill.fill_qty)
-                                    costs = self.execution_model.calculate_roundtrip_costs(
-                                        active_trade["entry_price"], fill.fill_price, fill.fill_qty
-                                    )
-                                    net_pnl = gross_pnl - costs
+                        total_fill_qty = sum(fill.fill_qty for fill in fills)
+                        last_fill = fills[-1]
+                        replacement_signals: List[StrategySignal] = []
 
-                                    completed_trades.append(
-                                        BacktestTrade(
-                                            trade_id=active_trade["trade_id"],
-                                            symbol=active_trade["symbol"],
-                                            underlying_symbol=self.strategy_config.underlying_symbol,
-                                            option_type=active_trade["option_type"],
-                                            strike=active_trade["strike"],
-                                            direction="BUY",
-                                            entry_time=active_trade["entry_time"],
-                                            exit_time=fill.timestamp,
-                                            entry_price=active_trade["entry_price"],
-                                            exit_price=fill.fill_price,
-                                            qty=fill.fill_qty,
-                                            lot_size=active_trade["lot_size"],
-                                            gross_pnl=gross_pnl.quantize(Decimal("0.01")),
-                                            trading_costs=costs.quantize(Decimal("0.01")),
-                                            net_pnl=net_pnl.quantize(Decimal("0.01")),
-                                            exit_reason=reason,
-                                            strategy_version=getattr(self.strategy_config, "version", 1),
-                                        )
-                                    )
-                                    active_trade = None
+                        if order_req.side == OrderSide.BUY:
+                            # Aggregate partial entry fills into one position.
+                            weighted_price = sum(
+                                (fill.fill_price * Decimal(fill.fill_qty) for fill in fills),
+                                Decimal("0"),
+                            ) / Decimal(total_fill_qty)
+                            active_trade = {
+                                "trade_id": f"TRD_{last_fill.client_order_id[:10]}",
+                                "symbol": last_fill.symbol,
+                                "contract": contract,
+                                "entry_time": fills[0].timestamp,
+                                "entry_price": weighted_price,
+                                "qty": total_fill_qty,
+                                "lot_size": contract.lot_size if contract else 25,
+                                "option_type": contract.option_type if contract else OptionType.CE,
+                                "strike": contract.strike if contract else Decimal("0"),
+                            }
+                            pending_order = None
+                        elif active_trade and total_fill_qty >= active_trade["qty"]:
+                            # Notify the strategy only after the complete exit is filled.
+                            weighted_exit_price = sum(
+                                (fill.fill_price * Decimal(fill.fill_qty) for fill in fills),
+                                Decimal("0"),
+                            ) / Decimal(total_fill_qty)
+                            confirmed_exit = Fill(
+                                client_order_id=last_fill.client_order_id,
+                                broker_order_id=last_fill.broker_order_id,
+                                symbol=last_fill.symbol,
+                                side=last_fill.side,
+                                fill_price=weighted_exit_price,
+                                fill_qty=total_fill_qty,
+                                timestamp=last_fill.timestamp,
+                            )
+                            replacement_signals = strategy.on_order_fill(confirmed_exit)
+                            gross_pnl = (weighted_exit_price - active_trade["entry_price"]) * Decimal(active_trade["qty"])
+                            costs = self.execution_model.calculate_roundtrip_costs(
+                                active_trade["entry_price"], weighted_exit_price, active_trade["qty"]
+                            )
+                            net_pnl = gross_pnl - costs
 
-                            # Process replacement signal (from atomic reversal Phase 2)
-                            if replacement_signals:
-                                rep_sig = replacement_signals[0]
-                                rep_contract = rep_sig.target_contract
-                                rep_req = OrderRequest(
-                                    client_order_id=f"ORD_{uuid4().hex[:12]}",
-                                    session_id=session_id,
-                                    symbol=rep_contract.symbol if rep_contract else active_trade["symbol"],
-                                    side=OrderSide.BUY,
-                                    order_type=OrderType.MARKET,
-                                    qty=(rep_contract.lot_size if rep_contract else 25) * self.strategy_config.lots,
-                                    product_type=ProductType.INTRADAY,
-                                    tag="REVERSAL_ENTRY",
+                            completed_trades.append(
+                                BacktestTrade(
+                                    trade_id=active_trade["trade_id"],
+                                    symbol=active_trade["symbol"],
+                                    underlying_symbol=self.strategy_config.underlying_symbol,
+                                    option_type=active_trade["option_type"],
+                                    strike=active_trade["strike"],
+                                    direction="BUY",
+                                    entry_time=active_trade["entry_time"],
+                                    exit_time=confirmed_exit.timestamp,
+                                    entry_price=active_trade["entry_price"],
+                                    exit_price=weighted_exit_price,
+                                    qty=active_trade["qty"],
+                                    lot_size=active_trade["lot_size"],
+                                    gross_pnl=gross_pnl.quantize(Decimal("0.01")),
+                                    trading_costs=costs.quantize(Decimal("0.01")),
+                                    net_pnl=net_pnl.quantize(Decimal("0.01")),
+                                    exit_reason=reason,
+                                    strategy_version=getattr(self.strategy_config, "version", 1),
                                 )
-                                # Queue replacement order for execution
-                                pending_order = (rep_req, rep_contract, rep_sig.reason)
-                            else:
-                                pending_order = None
+                            )
+                            active_trade = None
+                            pending_order = None
+
+                        # Process replacement signal from atomic reversal Phase 2.
+                        if replacement_signals:
+                            rep_sig = replacement_signals[0]
+                            rep_contract = rep_sig.target_contract
+                            rep_req = OrderRequest(
+                                client_order_id=f"ORD_{uuid4().hex[:12]}",
+                                session_id=session_id,
+                                symbol=rep_contract.symbol if rep_contract else self.strategy_config.underlying_symbol,
+                                side=OrderSide.BUY,
+                                order_type=OrderType.MARKET,
+                                qty=(rep_contract.lot_size if rep_contract else 25) * self.strategy_config.lots,
+                                product_type=ProductType.INTRADAY,
+                                tag="REVERSAL_ENTRY",
+                            )
+                            pending_order = (rep_req, rep_contract, rep_sig.reason)
 
                 # --------------------------------------------------------------
                 # Phase B: Intraday MTM & Risk Circuit Breakers

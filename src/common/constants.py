@@ -138,8 +138,8 @@ class BreakoutConfirmationMode(str, Enum):
 
 class RangeBoundaryMode(str, Enum):
     """Unresolved: Exact bar boundary inclusion for the 09:16 to 09:45 window."""
-    UP_TO_0944_CLOSE = "up_to_0944_close"  # 09:16:00 through 09:44:59 (ends at 09:45:00)
-    UP_TO_0945_CLOSE = "up_to_0945_close"  # 09:16:00 through 09:45:59 (ends at 09:46:00)
+    UP_TO_0944_CLOSE = "up_to_0944_close"  # Legacy: 09:16:00 through 09:44:59 (ends at 09:45:00)
+    UP_TO_0945_CLOSE = "up_to_0945_close"  # Active: 09:16:00 through 09:45:59 (ends at 09:46:00)
 
 
 class OrderExecutionStyle(str, Enum):

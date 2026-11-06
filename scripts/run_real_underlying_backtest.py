@@ -98,7 +98,7 @@ class UnderlyingPointBacktester:
     def __init__(self, strategy_config: Optional[StrategyConfig] = None) -> None:
         self.config = strategy_config or StrategyConfig(
             breakout_confirmation_mode=BreakoutConfirmationMode.CANDLE_CLOSE,
-            range_boundary_mode=RangeBoundaryMode.UP_TO_0944_CLOSE,
+            range_boundary_mode=RangeBoundaryMode.UP_TO_0945_CLOSE,
             trading_days=[TradingDay.MONDAY.value, TradingDay.THURSDAY.value, TradingDay.FRIDAY.value],
         )
         self.risk_config = RiskConfig()

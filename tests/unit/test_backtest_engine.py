@@ -160,6 +160,20 @@ def test_two_phase_reversal_execution(synthetic_builder: SyntheticMarketDataBuil
     assert run.diagnostics.reversals_count >= 1
 
 
+def test_partial_fill_reversal_waits_for_complete_exit(synthetic_builder: SyntheticMarketDataBuilder):
+    """A replacement entry must not be lost or emitted before the full exit fills."""
+    spot, options = synthetic_builder.build_reversal_dataset()
+    execution_config = ExecutionModelConfig(partial_fill_supported=True)
+
+    run = DiscreteEventBacktestEngine(execution_config=execution_config).run(spot, options)
+
+    assert len(run.trades) == 2
+    trade_ce, trade_pe = run.trades
+    assert trade_ce.option_type == OptionType.CE
+    assert trade_pe.option_type == OptionType.PE
+    assert trade_ce.exit_time <= trade_pe.entry_time
+
+
 # ==============================================================================
 # Area 6: Partial Fill Simulation
 # ==============================================================================

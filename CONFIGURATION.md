@@ -62,7 +62,7 @@ To ensure that unconfirmed backtest parameters are never silently defaulted or g
 | Decision Key | Allowed Options | StockMock Context | Fail-Closed Policy |
 | :--- | :--- | :--- | :--- |
 | `breakout_confirmation_mode` | `candle_close`, `intrabar_tick` | Whether breakout entry triggers on 1-min bar close or instantaneous tick touch. | Raises `UnconfirmedStrategySettingError` if `None`. |
-| `range_boundary_mode` | `up_to_0944_close`, `up_to_0945_close` | Whether 09:45:00 candle is part of the range (ends at 09:46) or range ends at 09:45:00. | Raises `UnconfirmedStrategySettingError` if `None`. |
+| `range_boundary_mode` | `up_to_0945_close`, `up_to_0944_close` | Active mode includes the completed 09:45:00 candle (30 bars, range ends at 09:46); the 09:44 mode is retained only for legacy comparisons. | Raises `UnconfirmedStrategySettingError` if `None`. |
 | `order_execution_style` | `market`, `marketable_limit` | Pure market order vs. limit order with slippage offset buffer. | Raises `UnconfirmedStrategySettingError` if `None`. |
 | `expiry_day_selection` | `current_weekly_0dte`, `next_weekly` | On Thursday sessions, whether to trade 0 DTE or roll to next weekly contract. | Raises `UnconfirmedStrategySettingError` if `None`. |
 | `profit_trailing_mode` | `lock_minimum_only`, `lock_and_trail` | Static lock at +₹500 vs. incremental step trailing. | Raises `UnconfirmedStrategySettingError` if `None`. |

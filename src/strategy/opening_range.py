@@ -4,12 +4,12 @@ Computes the NIFTY Opening Range (OR_HIGH and OR_LOW) between 09:16:00 IST
 and 09:45:00 IST with strict boundary semantics and deterministic freezing.
 """
 
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 from decimal import Decimal
-from typing import Optional
+from typing import Optional, Set
 
 from src.common.constants import RangeBoundaryMode
-from src.common.time_utils import to_ist
+from src.common.time_utils import IST_TZ, to_ist, to_utc
 from src.core.models import Candle, MarketTick, OpeningRange
 
 
@@ -18,10 +18,9 @@ class OpeningRangeTracker:
     Manages opening range formation and breakout detection.
     
     Supports both standard StockMock interval semantics:
-    - UP_TO_0944_CLOSE: Bars 09:16:00 through 09:44:59 build the range (ends at 09:45:00 IST).
-      The 09:45:00 candle is the first breakout evaluation candle.
-    - UP_TO_0945_CLOSE: Bars 09:16:00 through 09:45:59 build the range (ends at 09:46:00 IST).
-      The 09:46:00 candle is the first breakout evaluation candle.
+        - UP_TO_0944_CLOSE: Legacy mode; 29 bars from 09:16:00 through 09:44:59 build the range.
+        - UP_TO_0945_CLOSE: Active mode; 30 bars from 09:16:00 through 09:45:59 build the range.
+            The 09:46:00 candle is the first breakout evaluation candle.
     """
 
     def __init__(
@@ -29,7 +28,7 @@ class OpeningRangeTracker:
         symbol: str = "NSE:NIFTY50-INDEX",
         start_time: time = time(9, 16, 0),
         end_time: time = time(9, 45, 0),
-        boundary_mode: RangeBoundaryMode = RangeBoundaryMode.UP_TO_0944_CLOSE,
+        boundary_mode: RangeBoundaryMode = RangeBoundaryMode.UP_TO_0945_CLOSE,
     ) -> None:
         self.symbol = symbol
         self.start_time = start_time
@@ -42,6 +41,12 @@ class OpeningRangeTracker:
         self._is_established: bool = False
         self._candle_count: int = 0
         self._finalized_at: Optional[datetime] = None
+        self._formation_timestamps: Set[datetime] = set()
+
+    @property
+    def expected_candle_count(self) -> int:
+        """Number of completed one-minute candles required before freezing the range."""
+        return 30 if self.boundary_mode == RangeBoundaryMode.UP_TO_0945_CLOSE else 29
 
     def reset(self, session_date: date) -> None:
         """Reset the opening range state for a new trading session."""
@@ -51,6 +56,25 @@ class OpeningRangeTracker:
         self._is_established = False
         self._candle_count = 0
         self._finalized_at = None
+        self._formation_timestamps.clear()
+
+    def _expected_formation_timestamps(self) -> Set[datetime]:
+        """Return the expected UTC start timestamps for the active range window."""
+        if self._session_date is None:
+            return set()
+        end_time = self.end_time
+        if self.boundary_mode == RangeBoundaryMode.UP_TO_0944_CLOSE:
+            end_time = (datetime.combine(self._session_date, end_time) - timedelta(minutes=1)).time()
+        current = IST_TZ.localize(datetime.combine(self._session_date, self.start_time))
+        end = IST_TZ.localize(datetime.combine(self._session_date, end_time))
+        expected: Set[datetime] = set()
+        while current <= end:
+            expected.add(to_utc(current))
+            current += timedelta(minutes=1)
+        return expected
+
+    def _active_range_complete(self) -> bool:
+        return self._formation_timestamps == self._expected_formation_timestamps()
 
     @property
     def is_established(self) -> bool:
@@ -106,8 +130,7 @@ class OpeningRangeTracker:
 
         if self.boundary_mode == RangeBoundaryMode.UP_TO_0944_CLOSE:
             return candle_time_ist < self.end_time
-        else:
-            return candle_time_ist <= self.end_time
+        return candle_time_ist <= self.end_time
 
     def is_eligible_for_finalization(self, current_time_ist: time) -> bool:
         """
@@ -120,10 +143,9 @@ class OpeningRangeTracker:
         """
         if self.boundary_mode == RangeBoundaryMode.UP_TO_0944_CLOSE:
             return current_time_ist >= self.end_time
-        else:
-            # 09:45 bar closes at 09:46:00
-            cutoff = time(self.end_time.hour, self.end_time.minute + 1, self.end_time.second)
-            return current_time_ist >= cutoff
+        # 09:45 bar closes at 09:46:00.
+        cutoff = time(self.end_time.hour, self.end_time.minute + 1, self.end_time.second)
+        return current_time_ist >= cutoff
 
     def update_from_candle(self, candle: Candle) -> bool:
         """
@@ -144,16 +166,26 @@ class OpeningRangeTracker:
 
         # If this candle is at or past the finalization boundary, freeze now
         if self.is_eligible_for_finalization(bar_time):
+            if self.boundary_mode == RangeBoundaryMode.UP_TO_0945_CLOSE and not self._active_range_complete():
+                return False
             self.finalize(candle.timestamp)
             return True
 
         # Check if candle is inside the formation window
         if self.is_candle_in_range_window(bar_time):
+            if self.boundary_mode == RangeBoundaryMode.UP_TO_0945_CLOSE:
+                timestamp = to_utc(candle.timestamp)
+                expected = self._expected_formation_timestamps()
+                if timestamp not in expected or timestamp in self._formation_timestamps:
+                    return False
+                self._formation_timestamps.add(timestamp)
+                self._candle_count = len(self._formation_timestamps)
+            else:
+                self._candle_count += 1
             if self._high is None or candle.high > self._high:
                 self._high = candle.high
             if self._low is None or candle.low < self._low:
                 self._low = candle.low
-            self._candle_count += 1
 
         return False
 
@@ -174,15 +206,34 @@ class OpeningRangeTracker:
             return False
 
         if self.is_eligible_for_finalization(tick_time):
+            if self.boundary_mode == RangeBoundaryMode.UP_TO_0945_CLOSE and not self._active_range_complete():
+                return False
             self.finalize(tick.timestamp)
             return True
 
-        if self.start_time <= tick_time < self.end_time:
+        active_tick_cutoff = (datetime.combine(date.today(), self.end_time) + timedelta(minutes=1)).time()
+        in_tick_window = (
+            self.start_time <= tick_time < active_tick_cutoff
+            if self.boundary_mode == RangeBoundaryMode.UP_TO_0945_CLOSE
+            else self.start_time <= tick_time < self.end_time
+        )
+        if in_tick_window:
+            if self.boundary_mode == RangeBoundaryMode.UP_TO_0945_CLOSE:
+                timestamp = to_utc(tick.timestamp).replace(second=0, microsecond=0)
+                expected = self._expected_formation_timestamps()
+                if timestamp not in expected:
+                    return False
+                is_new_minute = timestamp not in self._formation_timestamps
+                self._formation_timestamps.add(timestamp)
+                self._candle_count = len(self._formation_timestamps)
+            else:
+                is_new_minute = True
             if self._high is None or tick.ltp > self._high:
                 self._high = tick.ltp
             if self._low is None or tick.ltp < self._low:
                 self._low = tick.ltp
-            self._candle_count += 1
+            if not is_new_minute:
+                return False
 
         return False
 

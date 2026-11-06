@@ -202,7 +202,7 @@ def validate_10c():
         orb_end_time=time(9, 45, 0),
         trading_days=["Monday", "Thursday", "Friday"],
         breakout_confirmation_mode=BreakoutConfirmationMode.CANDLE_CLOSE,
-        range_boundary_mode=RangeBoundaryMode.UP_TO_0944_CLOSE,
+        range_boundary_mode=RangeBoundaryMode.UP_TO_0945_CLOSE,
     )
     risk_cfg = RiskConfig()
     strat = NiftyOrbStrategy(strategy_config=strat_cfg, risk_config=risk_cfg)
@@ -309,7 +309,7 @@ async def validate_10d():
         orb_end_time=time(9, 45, 0),
         trading_days=["Monday", "Thursday", "Friday"],
         breakout_confirmation_mode=BreakoutConfirmationMode.CANDLE_CLOSE,
-        range_boundary_mode=RangeBoundaryMode.UP_TO_0944_CLOSE,
+        range_boundary_mode=RangeBoundaryMode.UP_TO_0945_CLOSE,
     )
     ws.strategy = NiftyOrbStrategy(
         strategy_config=strat_cfg,

@@ -95,9 +95,9 @@ export function Header({ onOpenKillSwitch }: HeaderProps) {
         <div className="h-4 w-px bg-slate-800" />
 
         {/* Institutional Paper Mode Pill */}
-        <div className="flex items-center space-x-1.5 px-2 py-0.5 rounded badge-paper text-[11px] font-mono font-semibold tracking-wider">
+        <div className={`flex items-center space-x-1.5 px-2 py-0.5 rounded text-[11px] font-mono font-semibold tracking-wider ${health?.execution_mode === "live" ? "badge-alert" : health?.execution_mode === "paper" ? "badge-paper" : "badge-synthetic"}`}>
           <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
-          <span>PAPER MODE</span>
+          <span>{health?.execution_mode ? `${health.execution_mode.toUpperCase()} MODE` : "MODE UNKNOWN"}</span>
         </div>
 
         {/* Data Source Badge */}
@@ -107,11 +107,11 @@ export function Header({ onOpenKillSwitch }: HeaderProps) {
               ? "bg-emerald-950/60 border-emerald-500/50 text-emerald-300"
               : health?.data_source === "HISTORICAL"
               ? "bg-blue-950/60 border-blue-500/50 text-blue-300"
-              : "bg-amber-950/60 border-amber-500/50 text-amber-300"
+              : "bg-slate-950/60 border-slate-700 text-slate-400"
           }`}
           title={`Active Market Data Source: ${health?.data_source || 'SYNTHETIC'}`}
         >
-          <span>DATA: {health?.data_source || "SYNTHETIC"}</span>
+          <span>DATA: {health?.data_source || "UNAVAILABLE"}</span>
         </div>
       </div>
 
@@ -121,7 +121,7 @@ export function Header({ onOpenKillSwitch }: HeaderProps) {
         <div className="flex items-center space-x-2 bg-[#0d121c] px-2.5 py-1 rounded border border-[#1c2638]">
           <TrendingUp className="w-3.5 h-3.5 text-cyan-400" />
           <span className="text-slate-400">NIFTY 50:</span>
-          <span className="font-bold text-slate-100 tabular-nums" title={health?.market_data_feed_connected ? "Last live exchange tick" : "No live feed: price unavailable"}>{health?.market_data_feed_connected && health?.live_last_ltp ? Number(health.live_last_ltp).toLocaleString("en-IN", { minimumFractionDigits: 2 }) : "--"}</span>
+          <span className="font-bold text-slate-100 tabular-nums" title={health?.market_data_feed_connected ? "Last live exchange tick" : "No live feed: price unavailable"}>{health?.market_data_feed_connected && health?.live_last_ltp ? Number(health.live_last_ltp).toLocaleString("en-IN", { minimumFractionDigits: 2 }) : "N/A"}</span>
         </div>
 
         {/* Session MTM */}
@@ -140,7 +140,7 @@ export function Header({ onOpenKillSwitch }: HeaderProps) {
         <div className="flex items-center space-x-1.5 text-slate-300">
           <span className="text-slate-400">DATE:</span>
           <span className="font-medium text-slate-200 tabular-nums">
-            {session?.trading_date || "2026-11-02"}
+            {session?.trading_date || "N/A"}
           </span>
         </div>
 
@@ -148,7 +148,7 @@ export function Header({ onOpenKillSwitch }: HeaderProps) {
         <div className="flex items-center space-x-1.5 text-slate-300">
           <span className="text-slate-400">PHASE:</span>
           <span className={`font-medium ${session?.phase === "ACTIVE_TRADING" ? "text-emerald-400" : "text-blue-400"}`}>
-            {session?.phase || "CLOSED"}
+            {session?.phase || "UNKNOWN"}
           </span>
         </div>
 
@@ -179,7 +179,7 @@ export function Header({ onOpenKillSwitch }: HeaderProps) {
           {/* Paper Broker */}
           <div className="flex items-center space-x-1" title={health?.broker_connected ? "Paper Execution Gateway Connected" : "Paper Broker Disconnected"}>
             <Wifi className={`w-3.5 h-3.5 ${health?.broker_connected ? "text-emerald-400" : "text-amber-400"}`} />
-            <span className="text-slate-300">PAPER</span>
+            <span className="text-slate-300">{health?.execution_mode ? health.execution_mode.toUpperCase() : "MODE"}</span>
           </div>
 
           <span className="text-slate-700">|</span>

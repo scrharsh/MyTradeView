@@ -86,7 +86,7 @@ def test_fail_closed_on_unresolved_strategy_decisions():
     """Verify system fails closed when strategy execution is attempted with unconfirmed settings."""
     app_config = AppConfig()
 
-    # By default, all 5 strategy decisions are unresolved (None)
+    # The approved range boundary is resolved by default; remaining decisions stay unresolved.
     with pytest.raises(UnconfirmedStrategySettingError) as exc_info:
         app_config.validate_executable_for_trading()
     assert "FAIL-CLOSED SAFETY INTERLOCK" in str(exc_info.value)
@@ -96,7 +96,7 @@ def test_fail_closed_on_unresolved_strategy_decisions():
     app_config.strategy.breakout_confirmation_mode = BreakoutConfirmationMode.CANDLE_CLOSE
     with pytest.raises(UnconfirmedStrategySettingError) as exc_info:
         app_config.validate_executable_for_trading()
-    assert "range_boundary_mode" in str(exc_info.value)
+    assert "order_execution_style" in str(exc_info.value)
 
     # Resolve all remaining unresolved decisions
     app_config.strategy.range_boundary_mode = RangeBoundaryMode.UP_TO_0944_CLOSE

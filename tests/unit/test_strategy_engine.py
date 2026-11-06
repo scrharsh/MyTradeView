@@ -178,6 +178,115 @@ def test_opening_range_accumulation_and_boundary_modes():
     assert tracker.low == Decimal("24430")
 
 
+def test_active_opening_range_includes_0945_and_starts_breakout_evaluation_at_0946():
+    """The active mode requires all 30 completed bars from 09:16 through 09:45."""
+    tracker = OpeningRangeTracker(
+        symbol="NSE:NIFTY50-INDEX",
+        start_time=time(9, 16, 0),
+        end_time=time(9, 45, 0),
+        boundary_mode=RangeBoundaryMode.UP_TO_0945_CLOSE,
+    )
+    tracker.reset(date(2026, 11, 6))
+
+    for minute in range(16, 46):
+        high = "24550" if minute == 45 else "24500"
+        tracker.update_from_candle(make_candle(f"09:{minute:02d}:00", "24450", high, "24400", "24450"))
+
+    assert tracker.candle_count == 30
+    assert tracker.is_established is False
+    assert tracker.update_from_candle(make_candle("09:46:00", "24450", "24600", "24300", "24550")) is True
+    assert tracker.is_established is True
+    assert tracker.high == Decimal("24550")
+    assert tracker.low == Decimal("24400")
+
+
+def test_active_opening_range_rejects_incomplete_data_before_breakout():
+    """A missing opening-range minute cannot establish the range or trigger trading."""
+    tracker = OpeningRangeTracker(
+        symbol="NSE:NIFTY50-INDEX",
+        start_time=time(9, 16, 0),
+        end_time=time(9, 45, 0),
+        boundary_mode=RangeBoundaryMode.UP_TO_0945_CLOSE,
+    )
+    tracker.reset(date(2026, 11, 6))
+
+    for minute in range(16, 46):
+        if minute != 30:
+            tracker.update_from_candle(make_candle(f"09:{minute:02d}:00", "24450", "24500", "24400", "24450"))
+
+    assert tracker.candle_count == 29
+    assert tracker.update_from_candle(make_candle("09:46:00", "24450", "24600", "24300", "24550")) is False
+    assert tracker.is_established is False
+
+
+def test_active_opening_range_duplicate_replacing_missing_minute_does_not_establish():
+    """A duplicate cannot substitute for a missing expected opening-range minute."""
+    tracker = OpeningRangeTracker(boundary_mode=RangeBoundaryMode.UP_TO_0945_CLOSE)
+    tracker.reset(date(2026, 11, 6))
+
+    for minute in range(16, 46):
+        if minute != 30:
+            tracker.update_from_candle(make_candle(f"09:{minute:02d}:00", "24450", "24500", "24400", "24450"))
+    tracker.update_from_candle(make_candle("09:29:00", "24450", "24600", "24400", "24450"))
+
+    assert tracker.candle_count == 29
+    assert tracker.update_from_candle(make_candle("09:46:00", "24450", "24600", "24300", "24550")) is False
+    assert tracker.is_established is False
+
+
+def test_active_opening_range_duplicate_0945_does_not_increase_count():
+    """Duplicate delivery of the final range candle is idempotent."""
+    tracker = OpeningRangeTracker(boundary_mode=RangeBoundaryMode.UP_TO_0945_CLOSE)
+    tracker.reset(date(2026, 11, 6))
+
+    for minute in range(16, 46):
+        tracker.update_from_candle(make_candle(f"09:{minute:02d}:00", "24450", "24500", "24400", "24450"))
+    tracker.update_from_candle(make_candle("09:45:00", "24450", "24600", "24400", "24450"))
+
+    assert tracker.candle_count == 30
+    assert tracker.update_from_candle(make_candle("09:46:00", "24450", "24600", "24300", "24550")) is True
+    assert tracker.is_established is True
+
+
+def test_active_opening_range_accepts_out_of_order_unique_candles():
+    """Out-of-order delivery does not lose timestamps or corrupt range bounds."""
+    tracker = OpeningRangeTracker(boundary_mode=RangeBoundaryMode.UP_TO_0945_CLOSE)
+    tracker.reset(date(2026, 11, 6))
+
+    for minute in reversed(range(16, 46)):
+        high = "24550" if minute == 45 else "24500"
+        tracker.update_from_candle(make_candle(f"09:{minute:02d}:00", "24450", high, "24400", "24450"))
+
+    assert tracker.candle_count == 30
+    assert tracker.update_from_candle(make_candle("09:46:00", "24450", "24600", "24300", "24550")) is True
+    assert tracker.high == Decimal("24550")
+    assert tracker.low == Decimal("24400")
+
+
+def test_incomplete_active_range_cannot_emit_breakout_entry():
+    """The strategy must remain in range calculation until all 30 bars exist."""
+    strategy = NiftyOrbStrategy(
+        StrategyConfig(
+            underlying_symbol="NSE:NIFTY50-INDEX",
+            orb_start_time=time(9, 16, 0),
+            orb_end_time=time(9, 45, 0),
+            trading_days=["Friday"],
+            breakout_confirmation_mode=BreakoutConfirmationMode.CANDLE_CLOSE,
+            range_boundary_mode=RangeBoundaryMode.UP_TO_0945_CLOSE,
+            expiry_day_selection=ExpiryDaySelectionMode.CURRENT_WEEKLY_0DTE,
+        ),
+        RiskConfig(),
+    )
+    strategy.on_session_start("SESS_INCOMPLETE_OR", date(2026, 11, 6))
+
+    for minute in range(16, 46):
+        if minute != 30:
+            strategy.on_candle(make_candle(f"09:{minute:02d}:00", "24450", "24500", "24400", "24450"))
+
+    assert strategy.on_candle(make_candle("09:46:00", "24450", "24600", "24300", "24550")) == []
+    assert strategy.state == StrategyState.CALCULATING_RANGE
+
+
 # ==============================================================================
 # 2. Trading Day Filter
 # ==============================================================================

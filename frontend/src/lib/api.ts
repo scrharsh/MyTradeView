@@ -14,6 +14,7 @@ import type {
   SystemHealthResponse,
   OrderResponseItem,
   MarketDataStatusResponse,
+  LiveFeedResponse,
 } from "../types/api";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000/api/v1";
@@ -35,7 +36,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 export const api = {
   getHealth: () => request<SystemHealthResponse>("/health"),
   getMarketDataStatus: () => request<MarketDataStatusResponse>("/market-data/status"),
-  getLiveFeedStatus: () => request<Record<string, unknown>>("/market-data/live/status"),
+  getLiveFeedStatus: () => request<LiveFeedResponse>("/market-data/live/status"),
   startLiveFeed: () => request<Record<string, unknown>>("/market-data/live/start", { method: "POST" }),
   stopLiveFeed: () => request<Record<string, unknown>>("/market-data/live/stop", { method: "POST" }),
   getActiveSession: () => request<SessionActiveResponse>("/sessions/active"),

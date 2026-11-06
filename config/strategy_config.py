@@ -52,8 +52,8 @@ class StrategyConfig(BaseModel):
         description="UNRESOLVED: Candle-close vs intrabar tick breakout trigger"
     )
     range_boundary_mode: Optional[RangeBoundaryMode] = Field(
-        default=None,
-        description="UNRESOLVED: Bar boundary inclusion for 09:16 to 09:45 window"
+        default=RangeBoundaryMode.UP_TO_0945_CLOSE,
+        description="Active boundary: include completed 09:45 candle (30 bars)"
     )
     order_execution_style: Optional[OrderExecutionStyle] = Field(
         default=None,
@@ -107,7 +107,7 @@ class StrategyConfig(BaseModel):
         if self.range_boundary_mode is None:
             raise UnconfirmedStrategySettingError(
                 "range_boundary_mode",
-                "Select UP_TO_0944_CLOSE (ends at 09:45:00) or UP_TO_0945_CLOSE (ends at 09:46:00)"
+                "Select UP_TO_0945_CLOSE (active: 30 bars, ends at 09:46:00) or UP_TO_0944_CLOSE (legacy: 29 bars)"
             )
         if self.order_execution_style is None:
             raise UnconfirmedStrategySettingError(

@@ -57,7 +57,7 @@ class StrategyConfigSnapshot(BaseModel):
     lot_size: int = 25
     trading_days: List[str] = Field(default_factory=lambda: ["Monday", "Thursday", "Friday"])
     breakout_confirmation_mode: str = "candle_close"
-    range_boundary_mode: str = "up_to_0944_close"
+    range_boundary_mode: str = "up_to_0945_close"
     order_execution_style: str = "market"
     expiry_day_selection: str = "current_weekly_0dte"
     strike_selection_mode: str = "ATM"

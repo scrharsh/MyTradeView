@@ -56,7 +56,7 @@ Real-time 1-minute candlestick feeds are routed through `WorkstationService.proc
 The strategy rules and risk interlocks adhere strictly to the established StockMock baseline:
 
 - **Underlying Instrument**: `NSE:NIFTY50-INDEX`
-- **Opening Range Window**: 09:16:00 to 09:45:00 IST (evaluated at 09:45 close for `UP_TO_0944_CLOSE` boundary mode)
+- **Opening Range Window**: 09:16:00 to 09:45:00 IST inclusive (30 completed bars; breakout evaluation begins at 09:46 for `UP_TO_0945_CLOSE`)
 - **Trading Day Filter**: Monday, Thursday, Friday only. Sessions on Tuesday or Wednesday are automatically bypassed.
 - **Initial Upside Breakout**: Candle close > OR High $\rightarrow$ Buy 1 lot ATM weekly CE (`NSE:NIFTY26NOV25000CE`).
 - **Initial Downside Breakout**: Candle close < OR Low $\rightarrow$ Buy 1 lot ATM weekly PE (`NSE:NIFTY26NOV25000PE`).

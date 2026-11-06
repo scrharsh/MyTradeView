@@ -35,10 +35,10 @@ flowchart LR
 
 - **Asset:** NIFTY 50 Cash Index (`NSE:NIFTY50-INDEX`)
 - **Resolution:** 1-minute OHLC bars
-- **Total Ingested Bars:** 3,001 continuous bars across 8 calendar sessions (October 22, 2026 to November 02, 2026)
+  - **Total Ingested Bars:** 3,001 continuous bars across 8 calendar sessions (October 27, 2026 to November 05, 2026)
 - **Data Quality Report:** 0 gaps, 0 anomalous records, 0 duplicate timestamps (`is_usable_for_backtest=True`)
 - **Strategy Semantics Enforced:**
-  - Range Window: 09:16:00 to 09:44:59 IST (`RangeBoundaryMode.UP_TO_0944_CLOSE`)
+  - Range Window: 09:16:00 to 09:45:59 IST (`RangeBoundaryMode.UP_TO_0945_CLOSE`, 30 completed bars)
   - Breakout Trigger: Candle close at or after 09:46:00 IST (`BreakoutConfirmationMode.CANDLE_CLOSE`)
   - Trading Days: Monday, Thursday, Friday only (`TradingDay` schedule). Tuesday and Wednesday are bypassed.
   - Fill Timing: Lookahead-free fill at next bar open (09:47:00 IST) using the spot candle open price.

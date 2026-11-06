@@ -87,7 +87,7 @@ class NiftyOrbStrategy(BaseStrategy):
         self._pending_reversal_spot: Optional[Decimal] = None
 
         # Component state managers
-        boundary_mode = self.config.range_boundary_mode or RangeBoundaryMode.UP_TO_0944_CLOSE
+        boundary_mode = self.config.range_boundary_mode or RangeBoundaryMode.UP_TO_0945_CLOSE
         self.range_tracker = OpeningRangeTracker(
             symbol=self.config.underlying_symbol,
             start_time=self.config.orb_start_time,
@@ -120,7 +120,7 @@ class NiftyOrbStrategy(BaseStrategy):
         self._pending_reversal_spot = None
 
         # Reinitialize state objects
-        boundary_mode = self.config.range_boundary_mode or RangeBoundaryMode.UP_TO_0944_CLOSE
+        boundary_mode = self.config.range_boundary_mode or RangeBoundaryMode.UP_TO_0945_CLOSE
         self.range_tracker = OpeningRangeTracker(
             symbol=self.config.underlying_symbol,
             start_time=self.config.orb_start_time,

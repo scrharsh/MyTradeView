@@ -193,7 +193,7 @@ def get_nifty_orb_template() -> StrategyTemplate:
             "range_boundary_mode": StrategyParameterDefinition(
                 name="range_boundary_mode",
                 param_type="str",
-                default_value=RangeBoundaryMode.UP_TO_0944_CLOSE.value,
+                default_value=RangeBoundaryMode.UP_TO_0945_CLOSE.value,
                 description="Opening range candle boundary window mode",
                 allowed_values=[m.value for m in RangeBoundaryMode],
             ),

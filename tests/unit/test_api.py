@@ -44,7 +44,7 @@ def test_strategy_validate_valid(init_service):
         "template_type": "NIFTY_ORB",
         "parameters": {
             "breakout_confirmation_mode": "CANDLE_CLOSE",
-            "range_boundary_mode": "UP_TO_0944_CLOSE",
+            "range_boundary_mode": "UP_TO_0945_CLOSE",
             "profit_trailing_mode": "LOCK_AND_TRAIL",
             "max_daily_loss": 3000.0,
         },

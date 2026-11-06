@@ -65,11 +65,25 @@ def test_underlying_signal_backtest_with_real_candles():
     results = backtester.run(candles)
 
     assert results["total_sessions"] == 8
-    assert results["traded_sessions"] == 6
-    assert results["skipped_sessions"] == 2
-    assert results["total_trades"] == 8
-    assert results["total_points_pnl"] == 119.8
-    assert results["profit_factor"] == 1.29
+    assert results["traded_sessions"] == 4
+    assert results["skipped_sessions"] == 4
+    assert results["total_trades"] == 6
+    assert results["winning_trades"] == 2
+    assert results["losing_trades"] == 4
+    assert results["win_rate_pct"] == 33.33
+    assert results["total_points_pnl"] == -65.45
+    assert results["profit_factor"] == 0.83
+    assert results["max_drawdown_points"] == 394.05
+    assert {
+        summary["date"]
+        for summary in results["session_summaries"]
+        if summary["is_traded_day"]
+    } == {"2026-10-29", "2026-10-30", "2026-11-02", "2026-11-05"}
+    assert all(
+        summary["trades_count"] > 0
+        for summary in results["session_summaries"]
+        if summary["is_traded_day"]
+    )
     assert all("strike" not in t for t in results["trades"])  # Pure underlying points!
 
 

@@ -70,6 +70,7 @@ export interface CandlesResponse {
   symbol: string;
   resolution: string;
   provenance: string;
+  data_source?: string;
   is_synthetic: boolean;
   candle_count: number;
   candles: CandleResponseItem[];
@@ -317,6 +318,46 @@ export interface MarketDataStatusResponse {
   current_time_ist: string;
   market_operating_window: string;
   has_credentials: boolean;
+  last_candle_time?: string | null;
+  last_tick_time?: string | null;
+  reconnect_count?: number;
+  websocket_connected?: boolean;
+  subscribed?: boolean;
+  fresh_tick_received?: boolean;
+  fyers_auth_reason?: string;
+  anomalies?: Record<string, number>;
+  live_feed?: LiveFeedResponse;
+}
+
+export interface LiveFeedResponse {
+  authentication?: {
+    authenticated: boolean;
+    token_present: boolean;
+    oauth_configured: boolean;
+    validated_at?: string | null;
+    reason: string;
+  };
+  pipeline_running: boolean;
+  websocket_connected: boolean;
+  subscribed: boolean;
+  fresh_tick_received: boolean;
+  state: string;
+  live_data_connected: boolean;
+  execution_mode: string;
+  feed?: {
+    feed?: {
+      state: string;
+      websocket_connected: boolean;
+      subscribed: boolean;
+      fresh_tick_received: boolean;
+      last_tick_received_at?: string | null;
+      last_exchange_time?: string | null;
+      stats: Record<string, number>;
+    };
+    builder?: Record<string, number>;
+    pipeline?: Record<string, number>;
+    last_candle_time?: string | null;
+  } | null;
 }
 
 export interface AuditEventItem {

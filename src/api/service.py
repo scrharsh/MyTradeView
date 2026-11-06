@@ -841,7 +841,7 @@ NSE:NIFTY26NOV25100PE,NSE:NIFTY50-INDEX,25100.0,PE,2026-11-06,25,0.05
                     "range_boundary_mode": StrategyParameterDef(
                         name="range_boundary_mode",
                         param_type="enum",
-                        default_value="UP_TO_0944_CLOSE",
+                        default_value="UP_TO_0945_CLOSE",
                         description="High/low calculation window semantics",
                         allowed_values=["UP_TO_0944_CLOSE", "UP_TO_0945_CLOSE"],
                     ),
